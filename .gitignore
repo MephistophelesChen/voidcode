@@ -21,3 +21,4 @@ htmlcov/
 .playwright-mcp/
 .coverage
 .voidcode/
+.opencode/
