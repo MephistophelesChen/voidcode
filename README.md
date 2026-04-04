@@ -1,4 +1,4 @@
-[![Python](https://img.shields.io/badge/python-3.12%20%7C%203.13%20%7C%203.14-blue)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/python-3.14-blue)](https://www.python.org/)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](./LICENSE)
 [![CI](https://github.com/lei-jia-xing/voidcode/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/lei-jia-xing/voidcode/actions/workflows/ci.yml)
 
@@ -24,7 +24,7 @@ The current direction is intentionally narrow: ship a stable single-agent MVP lo
 
 ## Quickstart
 
-Preferred local setup uses uv-managed Python environments and Bun. Python 3.14 is preferred; if 3.14 is blocked on your machine, Python 3.13 or 3.12 are acceptable fallbacks within the supported `>=3.12,<3.15` range.
+Preferred local setup uses uv-managed Python environments and Bun. Python 3.14 is the supported version.
 
 > **Note:** The current implementation includes a real deterministic CLI → runtime → read-only tool slice for local file reads, plus a Bun frontend shell. The frontend is still mock-backed; there is no live backend API integration yet.
 

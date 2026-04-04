@@ -9,7 +9,7 @@ VoidCode uses:
 - `mise` for task management and sourcing the existing `.venv`
 - `uv` for dependency and package management (Python)
 - `bun` for frontend development and dependency management
-- Python 3.14 as the preferred uv-managed local version, with 3.13 or 3.12 as fallback options
+- Python 3.14 as the supported uv-managed local version
 
 ## Initial setup
 
