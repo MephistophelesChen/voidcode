@@ -1,0 +1,85 @@
+# PROJECT KNOWLEDGE BASE
+
+**Generated:** 2026-04-04
+**Commit:** d6157c7
+**Branch:** master
+
+## OVERVIEW
+Local-first coding agent runtime. Python backend (`src/voidcode`) plus Bun/React frontend shell (`frontend/`), both still pre-MVP.
+
+## STRUCTURE
+```text
+voidcode/
+├── src/voidcode/         # Python package in src-layout
+│   ├── runtime/          # Session, storage, events, runtime boundary
+│   ├── graph/            # Deterministic orchestration slice
+│   └── tools/            # Built-in tool contracts + implementations
+├── tests/                # pytest unit + integration coverage
+├── frontend/             # Bun/Vite/React shell; see frontend/AGENTS.md
+├── docs/                 # Architecture, roadmap, development, standards
+├── .github/workflows/    # CI + release automation
+└── mise.toml             # Repo task entrypoint
+```
+
+## WHERE TO LOOK
+| Task | Location | Notes |
+|------|----------|-------|
+| CLI behavior | `src/voidcode/cli.py` | `voidcode run`, `sessions list`, `sessions resume` |
+| Python entrypoint | `src/voidcode/__main__.py` | `python -m voidcode` delegates to CLI |
+| Runtime orchestration boundary | `src/voidcode/runtime/service.py` | CLI calls runtime, not graph directly |
+| Session persistence | `src/voidcode/runtime/storage.py` | SQLite-backed local session store |
+| Runtime contracts | `src/voidcode/runtime/contracts.py` | request/response boundary types |
+| Graph planning/finalization | `src/voidcode/graph/read_only_slice.py` | current deterministic slice |
+| Tool behavior | `src/voidcode/tools/read_file.py` | only real built-in tool today |
+| Unit tests | `tests/unit/` | contracts, metadata, import, CLI smoke |
+| Integration tests | `tests/integration/test_read_only_slice.py` | full deterministic slice + session persistence |
+| Dev workflow | `mise.toml` | canonical task runner |
+| Repo standards | `docs/coding-standards.md` | coding + commit rules |
+| Frontend work | `frontend/AGENTS.md` | read for any `frontend/` change |
+
+## CODE MAP
+| Symbol | Type | Location | Role |
+|--------|------|----------|------|
+| `main` | function | `src/voidcode/cli.py` | CLI process entry |
+| `build_parser` | function | `src/voidcode/cli.py` | command surface definition |
+| `VoidCodeRuntime` | class | `src/voidcode/runtime/service.py` | runtime boundary for requests/sessions |
+| `ToolRegistry` | class | `src/voidcode/runtime/service.py` | current built-in tool registry |
+
+## CONVENTIONS
+- Python is pinned to 3.14 only.
+- Use `uv` for Python env/deps; `mise` only orchestrates tasks and `.venv` loading.
+- Repo-level verification is `mise run check`; it chains Python and frontend checks.
+- Pre-commit runs hygiene + Ruff + mypy through `uv run`.
+- Commit messages follow Conventional Commits as documented in `docs/coding-standards.md`.
+- Tests import from `src/` layout directly; integration coverage lives in `tests/integration/`.
+
+## ANTI-PATTERNS (THIS PROJECT)
+- Do not have UI clients call tools directly.
+- Do not have LangGraph talk directly to UI clients; flow goes CLI/client → runtime → graph/tools.
+- Do not claim the frontend has live backend integration; it is still mock-backed.
+- Do not expand pre-MVP scope into multi-agent/cloud/IDE-plugin work unless the task explicitly targets roadmap changes.
+- Do not commit generated frontend artifacts.
+- Do not open public issues for security-sensitive reports.
+
+## UNIQUE STYLES
+- Backend architecture is intentionally split into `runtime/`, `graph/`, and `tools/` with contract files marking boundaries.
+- Session recovery is local and SQLite-backed under `.voidcode/`.
+- The only real backend slice today is deterministic read-only file access.
+- Frontend source is intentionally small and flatter than the aspirational structure described in `frontend/README.md`.
+
+## COMMANDS
+```bash
+mise install
+uv sync --extra dev
+uv run voidcode --help
+mise run lint
+mise run typecheck
+mise run test
+mise run check
+mise run pre-commit
+```
+
+## NOTES
+- `src/voidcode/` uses src-layout; do not look for a top-level `voidcode/` package directory.
+- CI has two jobs: Python and frontend. Release workflow only publishes Python packages.
+- Read `frontend/AGENTS.md` before touching anything under `frontend/`.
