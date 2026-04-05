@@ -7,6 +7,7 @@ from typing import Protocol, cast
 
 from . import __version__
 from .runtime.contracts import RuntimeRequest
+from .runtime.permission import PermissionResolution
 from .runtime.service import VoidCodeRuntime
 from .runtime.session import StoredSessionSummary
 
@@ -65,8 +66,16 @@ def _format_session_summary(session: StoredSessionSummary) -> str:
 def _handle_sessions_resume_command(args: argparse.Namespace) -> int:
     workspace = cast(Path, args.workspace)
     session_id = cast(str, args.session_id)
+    approval_decision = cast(PermissionResolution | None, getattr(args, "approval_decision", None))
     runtime = VoidCodeRuntime(workspace=workspace)
-    result = runtime.resume(session_id)
+    try:
+        result = runtime.resume(
+            session_id,
+            approval_request_id=cast(str | None, getattr(args, "approval_request_id", None)),
+            approval_decision=approval_decision,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"error: {exc}") from None
 
     _print_runtime_response(result)
     return 0
@@ -139,6 +148,15 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path.cwd(),
         help="Workspace root used to resolve the local session database.",
     )
+    _ = resume_parser.add_argument(
+        "--approval-request-id",
+        help="Optional pending approval request identifier to resolve during resume.",
+    )
+    _ = resume_parser.add_argument(
+        "--approval-decision",
+        choices=("allow", "deny"),
+        help="Optional approval decision applied to the pending request during resume.",
+    )
     resume_parser.set_defaults(handler=_handle_sessions_resume_command)
     return parser
 
@@ -146,6 +164,14 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if (
+        getattr(args, "command", None) == "sessions"
+        and getattr(args, "sessions_command", None) == "resume"
+    ):
+        has_request_id = getattr(args, "approval_request_id", None) is not None
+        has_decision = getattr(args, "approval_decision", None) is not None
+        if has_request_id != has_decision:
+            parser.error("--approval-request-id and --approval-decision must be provided together")
     handler = cast(Handler | None, getattr(args, "handler", None))
     if handler is None:
         parser.print_help()

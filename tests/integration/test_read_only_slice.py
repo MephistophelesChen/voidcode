@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import importlib
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol, cast
 from unittest.mock import patch
@@ -19,6 +21,7 @@ import pytest
 class EventLike(Protocol):
     event_type: str
     payload: dict[str, object]
+    sequence: int
 
 
 class StreamChunkLike(Protocol):
@@ -49,6 +52,7 @@ class RuntimeResponseLike(Protocol):
 
 class RuntimeRequestLike(Protocol):
     prompt: str
+    metadata: dict[str, object]
 
 
 class RuntimeRequestFactory(Protocol):
@@ -62,11 +66,114 @@ class RuntimeRunner(Protocol):
 
     def list_sessions(self) -> tuple[StoredSessionSummaryLike, ...]: ...
 
-    def resume(self, session_id: str) -> RuntimeResponseLike: ...
+    def resume(
+        self,
+        session_id: str,
+        *,
+        approval_request_id: str | None = None,
+        approval_decision: str | None = None,
+    ) -> RuntimeResponseLike: ...
 
 
 class RuntimeFactory(Protocol):
-    def __call__(self, *, workspace: Path) -> RuntimeRunner: ...
+    def __call__(
+        self,
+        *,
+        workspace: Path,
+        tool_registry: object | None = None,
+        graph: object | None = None,
+        permission_policy: object | None = None,
+        session_store: object | None = None,
+    ) -> RuntimeRunner: ...
+
+
+class ToolDefinitionFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        name: str,
+        description: str,
+        input_schema: dict[str, object],
+        read_only: bool,
+    ) -> object: ...
+
+
+class ToolCallFactory(Protocol):
+    def __call__(self, *, tool_name: str, arguments: dict[str, object]) -> object: ...
+
+
+class ToolResultFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        tool_name: str,
+        status: str,
+        content: str | None = None,
+        data: dict[str, object] | None = None,
+    ) -> object: ...
+
+
+class EventEnvelopeFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        session_id: str,
+        sequence: int,
+        event_type: str,
+        source: str,
+        payload: dict[str, object] | None = None,
+    ) -> object: ...
+
+
+class GraphRunResultFactory(Protocol):
+    def __call__(
+        self,
+        *,
+        session: object,
+        events: tuple[object, ...] = (),
+        tool_results: tuple[object, ...] = (),
+        output: str | None = None,
+    ) -> object: ...
+
+
+class ToolRegistryFactory(Protocol):
+    def __call__(self, *, tools: dict[str, object]) -> object: ...
+
+
+class ReadFileToolType(Protocol):
+    invoke: Callable[..., object]
+
+
+class ToolRegistryLike(Protocol):
+    tools: dict[str, object]
+
+
+class SessionStoreLike(Protocol):
+    def save_run(
+        self,
+        *,
+        workspace: Path,
+        request: RuntimeRequestLike,
+        response: RuntimeResponseLike,
+        clear_pending_approval: bool = True,
+    ) -> None: ...
+
+    def list_sessions(self, *, workspace: Path) -> tuple[StoredSessionSummaryLike, ...]: ...
+
+    def load_session(self, *, workspace: Path, session_id: str) -> RuntimeResponseLike: ...
+
+    def save_pending_approval(
+        self,
+        *,
+        workspace: Path,
+        request: RuntimeRequestLike,
+        response: RuntimeResponseLike,
+        pending_approval: object,
+    ) -> None: ...
+
+    def load_pending_approval(self, *, workspace: Path, session_id: str) -> object: ...
+
+    def clear_pending_approval(self, *, workspace: Path, session_id: str) -> None: ...
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -78,6 +185,371 @@ def _load_runtime_types() -> tuple[RuntimeRequestFactory, RuntimeFactory]:
     runtime_request = cast(RuntimeRequestFactory, contracts_module.RuntimeRequest)
     runtime_class = cast(RuntimeFactory, service_module.VoidCodeRuntime)
     return runtime_request, runtime_class
+
+
+@dataclass(frozen=True, slots=True)
+class _WritePlan:
+    tool_call: object
+
+
+@dataclass(frozen=True, slots=True)
+class _CommandPlan:
+    tool_call: object
+
+
+def _permission_runtime(
+    tmp_path: Path, *, mode: str = "ask"
+) -> tuple[RuntimeRequestFactory, RuntimeRunner, object, object, object]:
+    runtime_request, runtime_class = _load_runtime_types()
+    service_module = importlib.import_module("voidcode.runtime.service")
+    graph_contracts = importlib.import_module("voidcode.graph.contracts")
+    runtime_events = importlib.import_module("voidcode.runtime.events")
+    permission_module = importlib.import_module("voidcode.runtime.permission")
+    tool_contracts = importlib.import_module("voidcode.tools.contracts")
+    tool_definition = cast(ToolDefinitionFactory, tool_contracts.ToolDefinition)
+    tool_call = cast(ToolCallFactory, tool_contracts.ToolCall)
+    tool_result = cast(ToolResultFactory, tool_contracts.ToolResult)
+    event_envelope = cast(EventEnvelopeFactory, runtime_events.EventEnvelope)
+    graph_run_result = cast(GraphRunResultFactory, graph_contracts.GraphRunResult)
+    tool_registry_factory = cast(ToolRegistryFactory, service_module.ToolRegistry)
+    permission_policy = cast(Callable[..., object], permission_module.PermissionPolicy)
+
+    class WriteTool:
+        definition: object = tool_definition(
+            name="write_file",
+            description="Write a file",
+            input_schema={"path": {"type": "string"}},
+            read_only=False,
+        )
+
+        def invoke(self, _call: object, *, workspace: Path) -> object:
+            _ = workspace
+            return tool_result(
+                tool_name="write_file",
+                status="ok",
+                content="write ok",
+                data={"path": "danger.txt"},
+            )
+
+    class WriteGraph:
+        def plan(self, _request: object) -> object:
+            return _WritePlan(
+                tool_call=tool_call(
+                    tool_name="write_file",
+                    arguments={"path": "danger.txt"},
+                )
+            )
+
+        def finalize(self, request: object, tool_result: object, *, session: object) -> object:
+            typed_session = cast(SessionLike, session)
+            session_ref = cast(SessionRefLike, typed_session.session)
+            typed_request = cast(RuntimeRequestLike, request)
+            sequence = cast(int, typed_request.metadata.get("response_sequence", 6))
+            return graph_run_result(
+                session=session,
+                events=(
+                    event_envelope(
+                        session_id=session_ref.id,
+                        sequence=sequence,
+                        event_type="graph.response_ready",
+                        source="graph",
+                        payload={"output_preview": "write ok"},
+                    ),
+                ),
+                tool_results=(tool_result,),
+                output="write ok",
+            )
+
+    tool_registry = tool_registry_factory(tools={"write_file": WriteTool()})
+    policy = permission_policy(mode=mode)
+    graph = WriteGraph()
+    runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=policy,
+            ),
+        ),
+    )
+    return runtime_request, runtime, tool_registry, policy, graph
+
+
+def _command_permission_runtime(
+    tmp_path: Path, *, mode: str = "ask"
+) -> tuple[RuntimeRequestFactory, RuntimeRunner]:
+    runtime_request, runtime_class = _load_runtime_types()
+    service_module = importlib.import_module("voidcode.runtime.service")
+    graph_contracts = importlib.import_module("voidcode.graph.contracts")
+    runtime_events = importlib.import_module("voidcode.runtime.events")
+    permission_module = importlib.import_module("voidcode.runtime.permission")
+    tool_contracts = importlib.import_module("voidcode.tools.contracts")
+    tool_definition = cast(ToolDefinitionFactory, tool_contracts.ToolDefinition)
+    tool_call = cast(ToolCallFactory, tool_contracts.ToolCall)
+    tool_result = cast(ToolResultFactory, tool_contracts.ToolResult)
+    event_envelope = cast(EventEnvelopeFactory, runtime_events.EventEnvelope)
+    graph_run_result = cast(GraphRunResultFactory, graph_contracts.GraphRunResult)
+    tool_registry_factory = cast(ToolRegistryFactory, service_module.ToolRegistry)
+    permission_policy = cast(Callable[..., object], permission_module.PermissionPolicy)
+
+    class CommandTool:
+        definition: object = tool_definition(
+            name="shell_exec",
+            description="Run a shell command",
+            input_schema={"command": {"type": "string"}},
+            read_only=False,
+        )
+
+        def invoke(self, _call: object, *, workspace: Path) -> object:
+            _ = workspace
+            return tool_result(
+                tool_name="shell_exec",
+                status="ok",
+                content="command ok",
+                data={"command": "pwd"},
+            )
+
+    class CommandGraph:
+        def plan(self, _request: object) -> object:
+            return _CommandPlan(
+                tool_call=tool_call(
+                    tool_name="shell_exec",
+                    arguments={"command": "pwd"},
+                )
+            )
+
+        def finalize(self, request: object, tool_result: object, *, session: object) -> object:
+            typed_session = cast(SessionLike, session)
+            session_ref = cast(SessionRefLike, typed_session.session)
+            typed_request = cast(RuntimeRequestLike, request)
+            sequence = cast(int, typed_request.metadata.get("response_sequence", 6))
+            return graph_run_result(
+                session=session,
+                events=(
+                    event_envelope(
+                        session_id=session_ref.id,
+                        sequence=sequence,
+                        event_type="graph.response_ready",
+                        source="graph",
+                        payload={"output_preview": "command ok"},
+                    ),
+                ),
+                tool_results=(tool_result,),
+                output="command ok",
+            )
+
+    tool_registry = tool_registry_factory(tools={"shell_exec": CommandTool()})
+    policy = permission_policy(mode=mode)
+    graph = CommandGraph()
+    runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=policy,
+            ),
+        ),
+    )
+    return runtime_request, runtime
+
+
+def test_runtime_allows_non_read_only_tool_when_policy_is_allow(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="allow")
+
+    allowed = runtime.run(runtime_request(prompt="write danger.txt", session_id="allow-session"))
+
+    assert allowed.session.status == "completed"
+    assert [event.event_type for event in allowed.events] == [
+        "runtime.request_received",
+        "graph.tool_request_created",
+        "runtime.tool_lookup_succeeded",
+        "runtime.approval_resolved",
+        "runtime.tool_completed",
+        "graph.response_ready",
+    ]
+    assert allowed.events[3].payload["decision"] == "allow"
+    assert allowed.output == "write ok"
+
+
+def test_runtime_tool_request_created_supports_non_path_tool_arguments(tmp_path: Path) -> None:
+    runtime_request, runtime = _command_permission_runtime(tmp_path, mode="allow")
+
+    result = runtime.run(runtime_request(prompt="run pwd", session_id="command-session"))
+
+    tool_request_event = result.events[1]
+    assert tool_request_event.event_type == "graph.tool_request_created"
+    assert tool_request_event.payload == {
+        "tool": "shell_exec",
+        "arguments": {"command": "pwd"},
+    }
+
+
+def test_runtime_persists_initial_allow_tool_failure_for_resume(tmp_path: Path) -> None:
+    runtime_request, runtime, tool_registry, permission_policy, graph = _permission_runtime(
+        tmp_path, mode="allow"
+    )
+
+    typed_tool_registry = cast(ToolRegistryLike, tool_registry)
+    write_tool = cast(ReadFileToolType, typed_tool_registry.tools["write_file"])
+
+    def _failing_write_invoke(_call: object, *, workspace: Path) -> object:
+        _ = workspace
+        raise RuntimeError("boom")
+
+    with patch.object(write_tool, "invoke", autospec=True, side_effect=_failing_write_invoke):
+        with pytest.raises(RuntimeError, match="boom"):
+            _ = runtime.run(runtime_request(prompt="write danger.txt", session_id="s1"))
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            _load_runtime_types()[1](
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    resumed = replay_runtime.resume("s1")
+
+    assert resumed.session.status == "failed"
+    assert resumed.events[-1].event_type == "runtime.failed"
+    assert resumed.events[-1].payload == {"error": "boom"}
+
+
+def test_runtime_persists_initial_allow_finalize_failure_for_resume(tmp_path: Path) -> None:
+    runtime_request, _, tool_registry, permission_policy, _ = _permission_runtime(
+        tmp_path, mode="allow"
+    )
+
+    class FailingFinalizeGraph:
+        def plan(self, _request: object) -> object:
+            return _WritePlan(
+                tool_call=cast(
+                    ToolCallFactory, importlib.import_module("voidcode.tools.contracts").ToolCall
+                )(
+                    tool_name="write_file",
+                    arguments={"path": "danger.txt"},
+                )
+            )
+
+        def finalize(self, request: object, tool_result: object, *, session: object) -> object:
+            _ = request
+            _ = tool_result
+            _ = session
+            raise RuntimeError("finalize boom")
+
+    runtime_class = _load_runtime_types()[1]
+    failing_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingFinalizeGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="finalize boom"):
+        _ = failing_runtime.run(runtime_request(prompt="write danger.txt", session_id="s1"))
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingFinalizeGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    resumed = replay_runtime.resume("s1")
+
+    assert resumed.session.status == "failed"
+    assert resumed.events[-2].event_type == "runtime.tool_completed"
+    assert resumed.events[-1].event_type == "runtime.failed"
+    assert resumed.events[-1].payload == {"error": "finalize boom"}
+
+
+def test_runtime_persists_initial_plan_failure_for_resume(tmp_path: Path) -> None:
+    runtime_request, _, tool_registry, permission_policy, _ = _permission_runtime(
+        tmp_path, mode="allow"
+    )
+
+    class FailingPlanGraph:
+        def plan(self, _request: object) -> object:
+            raise RuntimeError("plan boom")
+
+        def finalize(self, request: object, tool_result: object, *, session: object) -> object:
+            _ = request
+            _ = tool_result
+            _ = session
+            raise AssertionError("finalize should not run")
+
+    runtime_class = _load_runtime_types()[1]
+    failing_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingPlanGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="plan boom"):
+        _ = failing_runtime.run(runtime_request(prompt="write danger.txt", session_id="s1"))
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingPlanGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    resumed = replay_runtime.resume("s1")
+
+    assert resumed.session.status == "failed"
+    assert resumed.events[-1].event_type == "runtime.failed"
+    assert resumed.events[-1].payload == {"error": "plan boom"}
+
+
+def test_runtime_denies_non_read_only_tool_when_policy_is_deny(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="deny")
+
+    denied = runtime.run(runtime_request(prompt="write danger.txt", session_id="deny-session"))
+
+    assert denied.session.status == "failed"
+    assert [event.event_type for event in denied.events] == [
+        "runtime.request_received",
+        "graph.tool_request_created",
+        "runtime.tool_lookup_succeeded",
+        "runtime.approval_resolved",
+        "runtime.failed",
+    ]
+    assert denied.events[3].payload["decision"] == "deny"
+    assert denied.output is None
 
 
 def test_runtime_executes_read_only_slice_and_emits_events(tmp_path: Path) -> None:
@@ -98,6 +570,405 @@ def test_runtime_executes_read_only_slice_and_emits_events(tmp_path: Path) -> No
     ]
     assert result.session.status == "completed"
     assert result.output == "alpha\nbeta\n"
+
+
+def test_runtime_allows_non_read_only_tool_after_explicit_resume_approval(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="ask")
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+
+    assert waiting.session.status == "waiting"
+    assert [event.event_type for event in waiting.events] == [
+        "runtime.request_received",
+        "graph.tool_request_created",
+        "runtime.tool_lookup_succeeded",
+        "runtime.approval_requested",
+    ]
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    resumed = runtime.resume(
+        "approval-session",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert resumed.session.status == "completed"
+    assert [event.event_type for event in resumed.events] == [
+        "runtime.request_received",
+        "graph.tool_request_created",
+        "runtime.tool_lookup_succeeded",
+        "runtime.approval_requested",
+        "runtime.approval_resolved",
+        "runtime.tool_completed",
+        "graph.response_ready",
+    ]
+    assert resumed.output == "write ok"
+
+
+def test_runtime_resumed_approval_renumbers_fixed_finalize_sequences(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="ask")
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    resumed = runtime.resume(
+        "approval-session",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert resumed.session.status == "completed"
+    assert [event.sequence for event in resumed.events] == [1, 2, 3, 4, 5, 6, 7]
+    assert resumed.events[-1].event_type == "graph.response_ready"
+
+
+def test_runtime_persists_pending_approval_until_single_resume_resolution(tmp_path: Path) -> None:
+    runtime_request, runtime, tool_registry, permission_policy, graph = _permission_runtime(
+        tmp_path, mode="ask"
+    )
+
+    waiting = runtime.run(
+        runtime_request(prompt="write danger.txt", session_id="persisted-approval")
+    )
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    _, replay_runtime_class = _load_runtime_types()
+    resumed_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            replay_runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+
+    replay = resumed_runtime.resume("persisted-approval")
+    resolved = resumed_runtime.resume(
+        "persisted-approval",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert replay.session.status == "waiting"
+    assert replay.events[-1].event_type == "runtime.approval_requested"
+    assert replay.events[-1].payload["policy"] == {"mode": "ask"}
+    assert resolved.session.status == "completed"
+    with pytest.raises(ValueError, match="no pending approval"):
+        _ = resumed_runtime.resume(
+            "persisted-approval",
+            approval_request_id=approval_request_id,
+            approval_decision="allow",
+        )
+
+
+def test_runtime_migrates_legacy_session_schema_for_pending_approval(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="ask")
+    database_path = tmp_path / ".voidcode" / "sessions.sqlite3"
+    database_path.parent.mkdir(parents=True, exist_ok=True)
+
+    connection = sqlite3.connect(database_path)
+    try:
+        _ = connection.execute(
+            """
+            CREATE TABLE sessions (
+                session_id TEXT PRIMARY KEY,
+                workspace TEXT NOT NULL,
+                status TEXT NOT NULL,
+                turn INTEGER NOT NULL,
+                prompt TEXT NOT NULL,
+                output TEXT,
+                metadata_json TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                last_event_sequence INTEGER NOT NULL
+            )
+            """
+        )
+        _ = connection.execute(
+            """
+            CREATE TABLE session_events (
+                session_id TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                event_type TEXT NOT NULL,
+                source TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                PRIMARY KEY (session_id, sequence)
+            )
+            """
+        )
+        _ = connection.execute("PRAGMA user_version = 1")
+        connection.commit()
+    finally:
+        connection.close()
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="legacy-session"))
+
+    assert waiting.session.status == "waiting"
+
+    check = sqlite3.connect(database_path)
+    try:
+        rows = cast(
+            list[tuple[object, ...]], check.execute("PRAGMA table_info(sessions)").fetchall()
+        )
+        columns = [cast(str, row[1]) for row in rows]
+        user_version = cast(int, check.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        check.close()
+
+    assert "pending_approval_json" in columns
+    assert user_version == 2
+
+
+def test_runtime_denies_non_read_only_tool_on_resume(tmp_path: Path) -> None:
+    runtime_request, runtime, _, _, _ = _permission_runtime(tmp_path, mode="ask")
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    denied = runtime.resume(
+        "approval-session",
+        approval_request_id=approval_request_id,
+        approval_decision="deny",
+    )
+
+    assert denied.session.status == "failed"
+    assert [event.event_type for event in denied.events[-2:]] == [
+        "runtime.approval_resolved",
+        "runtime.failed",
+    ]
+    assert denied.output is None
+
+
+def test_runtime_marks_resumed_approval_failure_and_clears_pending_request(tmp_path: Path) -> None:
+    runtime_request, runtime, tool_registry, permission_policy, graph = _permission_runtime(
+        tmp_path, mode="ask"
+    )
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    typed_tool_registry = cast(ToolRegistryLike, tool_registry)
+    write_tool = cast(ReadFileToolType, typed_tool_registry.tools["write_file"])
+
+    def _failing_write_invoke(_call: object, *, workspace: Path) -> object:
+        _ = workspace
+        raise RuntimeError("resume boom")
+
+    with patch.object(write_tool, "invoke", autospec=True, side_effect=_failing_write_invoke):
+        resumed_runtime_class = _load_runtime_types()[1]
+        resumed_runtime = cast(
+            RuntimeRunner,
+            cast(
+                object,
+                resumed_runtime_class(
+                    workspace=tmp_path,
+                    tool_registry=tool_registry,
+                    graph=graph,
+                    permission_policy=permission_policy,
+                ),
+            ),
+        )
+        failed = resumed_runtime.resume(
+            "approval-session",
+            approval_request_id=approval_request_id,
+            approval_decision="allow",
+        )
+
+    assert failed.session.status == "failed"
+    assert failed.events[-2].event_type == "runtime.approval_resolved"
+    assert failed.events[-1].event_type == "runtime.failed"
+    assert failed.events[-1].payload == {"error": "resume boom"}
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            _load_runtime_types()[1](
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="no pending approval"):
+        _ = replay_runtime.resume(
+            "approval-session",
+            approval_request_id=approval_request_id,
+            approval_decision="allow",
+        )
+
+
+def test_runtime_marks_resumed_finalize_failure_and_clears_pending_request(tmp_path: Path) -> None:
+    runtime_request, runtime, tool_registry, permission_policy, _ = _permission_runtime(
+        tmp_path, mode="ask"
+    )
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    class FailingFinalizeGraph:
+        def plan(self, _request: object) -> object:
+            return _WritePlan(
+                tool_call=cast(
+                    ToolCallFactory, importlib.import_module("voidcode.tools.contracts").ToolCall
+                )(
+                    tool_name="write_file",
+                    arguments={"path": "danger.txt"},
+                )
+            )
+
+        def finalize(self, request: object, tool_result: object, *, session: object) -> object:
+            _ = request
+            _ = tool_result
+            _ = session
+            raise RuntimeError("finalize boom")
+
+    resumed_runtime_class = _load_runtime_types()[1]
+    resumed_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            resumed_runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingFinalizeGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    failed = resumed_runtime.resume(
+        "approval-session",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert failed.session.status == "failed"
+    assert failed.events[-2].event_type == "runtime.tool_completed"
+    assert failed.events[-1].event_type == "runtime.failed"
+    assert failed.events[-1].payload == {"error": "finalize boom"}
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            _load_runtime_types()[1](
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=FailingFinalizeGraph(),
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    with pytest.raises(ValueError, match="no pending approval"):
+        _ = replay_runtime.resume(
+            "approval-session",
+            approval_request_id=approval_request_id,
+            approval_decision="allow",
+        )
+
+
+def test_runtime_preserves_pending_approval_when_terminal_save_fails(tmp_path: Path) -> None:
+    runtime_request, runtime, tool_registry, permission_policy, graph = _permission_runtime(
+        tmp_path, mode="ask"
+    )
+
+    waiting = runtime.run(runtime_request(prompt="write danger.txt", session_id="approval-session"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+
+    storage_module = importlib.import_module("voidcode.runtime.storage")
+    sqlite_store_class = cast(Callable[[], SessionStoreLike], storage_module.SqliteSessionStore)
+    base_store = sqlite_store_class()
+
+    class FailingTerminalSaveStore:
+        def save_run(
+            self,
+            *,
+            workspace: Path,
+            request: object,
+            response: object,
+            clear_pending_approval: bool = True,
+        ) -> None:
+            _ = request
+            if clear_pending_approval:
+                raise RuntimeError("save boom")
+            base_store.save_run(
+                workspace=workspace,
+                request=cast(RuntimeRequestLike, request),
+                response=cast(RuntimeResponseLike, response),
+                clear_pending_approval=clear_pending_approval,
+            )
+
+        def list_sessions(self, *, workspace: Path) -> tuple[object, ...]:
+            return base_store.list_sessions(workspace=workspace)
+
+        def load_session(self, *, workspace: Path, session_id: str) -> object:
+            return base_store.load_session(workspace=workspace, session_id=session_id)
+
+        def save_pending_approval(
+            self,
+            *,
+            workspace: Path,
+            request: object,
+            response: object,
+            pending_approval: object,
+        ) -> None:
+            base_store.save_pending_approval(
+                workspace=workspace,
+                request=cast(RuntimeRequestLike, request),
+                response=cast(RuntimeResponseLike, response),
+                pending_approval=pending_approval,
+            )
+
+        def load_pending_approval(self, *, workspace: Path, session_id: str) -> object:
+            return base_store.load_pending_approval(workspace=workspace, session_id=session_id)
+
+        def clear_pending_approval(self, *, workspace: Path, session_id: str) -> None:
+            base_store.clear_pending_approval(workspace=workspace, session_id=session_id)
+
+    resumed_runtime_class = _load_runtime_types()[1]
+    resumed_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            resumed_runtime_class(
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=permission_policy,
+                session_store=FailingTerminalSaveStore(),
+            ),
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="save boom"):
+        _ = resumed_runtime.resume(
+            "approval-session",
+            approval_request_id=approval_request_id,
+            approval_decision="allow",
+        )
+
+    replay_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            _load_runtime_types()[1](
+                workspace=tmp_path,
+                tool_registry=tool_registry,
+                graph=graph,
+                permission_policy=permission_policy,
+            ),
+        ),
+    )
+    replay = replay_runtime.resume("approval-session")
+
+    assert replay.session.status == "waiting"
+    assert replay.events[-1].event_type == "runtime.approval_requested"
+    assert cast(str, replay.events[-1].payload["request_id"]) == approval_request_id
 
 
 def test_cli_run_command_prints_events_and_file_contents(tmp_path: Path) -> None:
@@ -194,22 +1065,22 @@ def test_runtime_stream_yields_before_tool_completion(tmp_path: Path) -> None:
     sample_file = tmp_path / "sample.txt"
     _ = sample_file.write_text("delayed stream\n", encoding="utf-8")
     runtime_request, runtime_class = _load_runtime_types()
-    from voidcode.tools.contracts import ToolCall, ToolResult
-    from voidcode.tools.read_file import ReadFileTool
+    read_file_module = importlib.import_module("voidcode.tools.read_file")
 
     tool_started = threading.Event()
     allow_tool_completion = threading.Event()
     fifth_chunk_ready = threading.Event()
     fifth_chunk: list[StreamChunkLike] = []
 
-    original_invoke = ReadFileTool.invoke
+    read_file_tool = cast(ReadFileToolType, read_file_module.ReadFileTool)
+    original_invoke = read_file_tool.invoke
 
-    def _blocking_invoke(self: ReadFileTool, call: ToolCall, *, workspace: Path) -> ToolResult:
+    def _blocking_invoke(self: object, _call: object, *, workspace: Path) -> object:
         tool_started.set()
         _ = allow_tool_completion.wait(timeout=2)
-        return original_invoke(self, call, workspace=workspace)
+        return original_invoke(self, _call, workspace=workspace)
 
-    with patch.object(ReadFileTool, "invoke", autospec=True, side_effect=_blocking_invoke):
+    with patch.object(read_file_tool, "invoke", autospec=True, side_effect=_blocking_invoke):
         runtime = runtime_class(workspace=tmp_path)
         stream = runtime.run_stream(runtime_request(prompt="read sample.txt"))
 
@@ -261,13 +1132,14 @@ def test_runtime_stream_emits_failed_terminal_chunk_before_tool_error(tmp_path: 
     sample_file = tmp_path / "sample.txt"
     _ = sample_file.write_text("failure proof\n", encoding="utf-8")
     runtime_request, runtime_class = _load_runtime_types()
-    from voidcode.tools.contracts import ToolCall
-    from voidcode.tools.read_file import ReadFileTool
+    read_file_module = importlib.import_module("voidcode.tools.read_file")
+    read_file_tool = cast(ReadFileToolType, read_file_module.ReadFileTool)
 
-    def _failing_invoke(self: ReadFileTool, call: ToolCall, *, workspace: Path) -> object:
+    def _failing_invoke(_self: object, _call: object, *, workspace: Path) -> object:
+        _ = workspace
         raise ValueError("boom from tool")
 
-    with patch.object(ReadFileTool, "invoke", autospec=True, side_effect=_failing_invoke):
+    with patch.object(read_file_tool, "invoke", autospec=True, side_effect=_failing_invoke):
         runtime = runtime_class(workspace=tmp_path)
         stream = runtime.run_stream(runtime_request(prompt="read sample.txt"))
 
