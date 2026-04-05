@@ -13,9 +13,12 @@ from pathlib import Path
 from typing import Protocol, cast
 from unittest.mock import patch
 
+import pytest
+
 
 class EventLike(Protocol):
     event_type: str
+    payload: dict[str, object]
 
 
 class StreamChunkLike(Protocol):
@@ -252,6 +255,40 @@ def test_runtime_stream_yields_before_tool_completion(tmp_path: Path) -> None:
             "delayed stream\n"
         ]
         assert all(chunk.session.status == "completed" for chunk in remaining_chunks)
+
+
+def test_runtime_stream_emits_failed_terminal_chunk_before_tool_error(tmp_path: Path) -> None:
+    sample_file = tmp_path / "sample.txt"
+    _ = sample_file.write_text("failure proof\n", encoding="utf-8")
+    runtime_request, runtime_class = _load_runtime_types()
+    from voidcode.tools.contracts import ToolCall
+    from voidcode.tools.read_file import ReadFileTool
+
+    def _failing_invoke(self: ReadFileTool, call: ToolCall, *, workspace: Path) -> object:
+        raise ValueError("boom from tool")
+
+    with patch.object(ReadFileTool, "invoke", autospec=True, side_effect=_failing_invoke):
+        runtime = runtime_class(workspace=tmp_path)
+        stream = runtime.run_stream(runtime_request(prompt="read sample.txt"))
+
+        first_four_chunks = [next(stream) for _ in range(4)]
+        failed_chunk = next(stream)
+
+        with pytest.raises(ValueError, match="boom from tool"):
+            _ = next(stream)
+
+    assert [chunk.event.event_type for chunk in first_four_chunks if chunk.event is not None] == [
+        "runtime.request_received",
+        "graph.tool_request_created",
+        "runtime.tool_lookup_succeeded",
+        "runtime.permission_resolved",
+    ]
+    assert all(chunk.session.status == "running" for chunk in first_four_chunks)
+    assert failed_chunk.kind == "event"
+    assert failed_chunk.event is not None
+    assert failed_chunk.event.event_type == "runtime.failed"
+    assert failed_chunk.event.payload == {"error": "boom from tool"}
+    assert failed_chunk.session.status == "failed"
 
 
 def test_cli_lists_and_resumes_persisted_session(tmp_path: Path) -> None:

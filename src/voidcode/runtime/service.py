@@ -85,13 +85,14 @@ class VoidCodeRuntime:
             turn=1,
             metadata={"workspace": str(self._workspace), **request.metadata},
         )
+        sequence = 1
 
         yield RuntimeStreamChunk(
             kind="event",
             session=session,
             event=EventEnvelope(
                 session_id=session.session.id,
-                sequence=1,
+                sequence=sequence,
                 event_type="runtime.request_received",
                 source="runtime",
                 payload={"prompt": request.prompt},
@@ -104,13 +105,19 @@ class VoidCodeRuntime:
             available_tools=self._tool_registry.definitions(),
             metadata=request.metadata,
         )
-        plan = self._graph.plan(graph_request)
+        try:
+            plan = self._graph.plan(graph_request)
+        except ValueError as exc:
+            yield self._failed_chunk(session=session, sequence=sequence + 1, error=str(exc))
+            raise
+
+        sequence += 1
         yield RuntimeStreamChunk(
             kind="event",
             session=session,
             event=EventEnvelope(
                 session_id=session.session.id,
-                sequence=2,
+                sequence=sequence,
                 event_type="graph.tool_request_created",
                 source="graph",
                 payload={
@@ -120,37 +127,51 @@ class VoidCodeRuntime:
             ),
         )
 
-        tool = self._tool_registry.resolve(plan.tool_call.tool_name)
+        try:
+            tool = self._tool_registry.resolve(plan.tool_call.tool_name)
+        except ValueError as exc:
+            yield self._failed_chunk(session=session, sequence=sequence + 1, error=str(exc))
+            raise
+
+        sequence += 1
         yield RuntimeStreamChunk(
             kind="event",
             session=session,
             event=EventEnvelope(
                 session_id=session.session.id,
-                sequence=3,
+                sequence=sequence,
                 event_type="runtime.tool_lookup_succeeded",
                 source="runtime",
                 payload={"tool": plan.tool_call.tool_name},
             ),
         )
+
+        sequence += 1
         yield RuntimeStreamChunk(
             kind="event",
             session=session,
             event=EventEnvelope(
                 session_id=session.session.id,
-                sequence=4,
+                sequence=sequence,
                 event_type="runtime.permission_resolved",
                 source="runtime",
                 payload={"tool": plan.tool_call.tool_name, "decision": "allow"},
             ),
         )
 
-        tool_result = tool.invoke(plan.tool_call, workspace=self._workspace)
+        try:
+            tool_result = tool.invoke(plan.tool_call, workspace=self._workspace)
+        except ValueError as exc:
+            yield self._failed_chunk(session=session, sequence=sequence + 1, error=str(exc))
+            raise
+
+        sequence += 1
         yield RuntimeStreamChunk(
             kind="event",
             session=session,
             event=EventEnvelope(
                 session_id=session.session.id,
-                sequence=5,
+                sequence=sequence,
                 event_type="runtime.tool_completed",
                 source="tool",
                 payload=tool_result.data,
@@ -177,6 +198,27 @@ class VoidCodeRuntime:
                 session=graph_result.session,
                 output=graph_result.output,
             )
+
+    def _failed_chunk(
+        self, *, session: SessionState, sequence: int, error: str
+    ) -> RuntimeStreamChunk:
+        failed_session = SessionState(
+            session=session.session,
+            status="failed",
+            turn=session.turn,
+            metadata=session.metadata,
+        )
+        return RuntimeStreamChunk(
+            kind="event",
+            session=failed_session,
+            event=EventEnvelope(
+                session_id=session.session.id,
+                sequence=sequence,
+                event_type="runtime.failed",
+                source="runtime",
+                payload={"error": error},
+            ),
+        )
 
     def list_sessions(self) -> tuple[StoredSessionSummary, ...]:
         return self._session_store.list_sessions(workspace=self._workspace)
