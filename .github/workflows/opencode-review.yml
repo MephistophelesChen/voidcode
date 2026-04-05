@@ -18,10 +18,9 @@ jobs:
                   persist-credentials: false
             - uses: anomalyco/opencode/github@latest
               env:
-                  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+                  OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
               with:
-                  model: github-copilot/gpt-5.4
-                  use_github_token: true
+                  model: opencode/gpt-5.4
                   prompt: |
                       Review this pull request:
                       - Check for code quality issues
