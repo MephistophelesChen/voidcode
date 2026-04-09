@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import tomllib
 from collections.abc import Mapping
-from pathlib import Path
 from typing import cast
+
+from .._paths import REPO_ROOT
 
 
 def test_pyproject_matches_expected_metadata() -> None:
-    pyproject_path = Path(__file__).resolve().parents[3] / "pyproject.toml"
+    pyproject_path = REPO_ROOT / "pyproject.toml"
 
     assert pyproject_path.exists(), "pyproject.toml must exist"
 
