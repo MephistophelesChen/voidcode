@@ -1,10 +1,5 @@
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
-
 from voidcode.graph.contracts import GraphRunRequest
 from voidcode.graph.single_agent_slice import ProviderSingleAgentGraph
 from voidcode.runtime.model_provider import ModelProviderRegistry, resolve_provider_model
