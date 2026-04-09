@@ -2,16 +2,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
-from voidcode.runtime.events import EventEnvelope
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "src"))
 
 from voidcode.runtime.acp import DisabledAcpAdapter
 from voidcode.runtime.config import (
@@ -20,6 +15,7 @@ from voidcode.runtime.config import (
     RuntimeLspConfig,
     RuntimeSkillsConfig,
 )
+from voidcode.runtime.events import EventEnvelope
 from voidcode.runtime.lsp import DisabledLspManager
 from voidcode.runtime.permission import PermissionPolicy
 from voidcode.runtime.service import (
