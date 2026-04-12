@@ -5,9 +5,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from lsprotocol import converters as lsp_converters
+from lsprotocol import types as lsp_types
 
 from voidcode.lsp import ResolvedLspServerConfig
 from voidcode.runtime.config import RuntimeLspConfig, RuntimeLspServerConfig
+from voidcode.tools import ToolCall
 
 
 def _load_lsp_symbols() -> tuple[Any, ...]:
@@ -183,3 +186,78 @@ def test_lsp_operation_strings_match_protocol_method_names() -> None:
     assert operation_enum.PREPARE_CALL_HIERARCHY.value == "textDocument/prepareCallHierarchy"
     assert operation_enum.INCOMING_CALLS.value == "callHierarchy/incomingCalls"
     assert operation_enum.OUTGOING_CALLS.value == "callHierarchy/outgoingCalls"
+
+
+def test_initialize_params_from_lsprotocol_keep_existing_wire_shape(tmp_path: Path) -> None:
+    converter = lsp_converters.get_converter()
+    workspace_root = tmp_path.resolve()
+    init_params = lsp_types.InitializeParams(
+        process_id=123,
+        client_info=lsp_types.ClientInfo(name="voidcode", version="0.1.0"),
+        locale="zh-CN",
+        root_uri=workspace_root.as_uri(),
+        workspace_folders=[
+            lsp_types.WorkspaceFolder(uri=workspace_root.as_uri(), name=workspace_root.name)
+        ],
+        capabilities=lsp_types.ClientCapabilities(),
+    )
+
+    payload = converter.unstructure(init_params, unstructure_as=lsp_types.InitializeParams)
+
+    assert payload["processId"] == 123
+    assert payload["clientInfo"] == {"name": "voidcode", "version": "0.1.0"}
+    assert payload["locale"] == "zh-CN"
+    assert payload["rootUri"] == workspace_root.as_uri()
+    assert payload["workspaceFolders"] == [
+        {"uri": workspace_root.as_uri(), "name": workspace_root.name}
+    ]
+    assert payload["capabilities"] == {}
+
+
+def test_lsp_tool_builds_same_text_document_position_wire_shape(tmp_path: Path) -> None:
+    sample_file = tmp_path / "sample.py"
+    sample_file.write_text("x = 1\n", encoding="utf-8")
+
+    class _StubResponse:
+        def __init__(self, response: dict[str, object]) -> None:
+            self.response = response
+
+    captured: dict[str, object] = {}
+
+    def _requester(
+        *,
+        server_name: str | None,
+        method: str,
+        params: dict[str, object],
+        workspace: Path,
+    ) -> _StubResponse:
+        captured["server_name"] = server_name
+        captured["method"] = method
+        captured["params"] = params
+        captured["workspace"] = workspace
+        return _StubResponse({"result": {"ok": True}})
+
+    tool_module = import_module("voidcode.tools.lsp")
+    tool = tool_module.LspTool(requester=_requester)
+
+    result = tool.invoke(
+        ToolCall(
+            tool_name="lsp",
+            arguments={
+                "operation": "textDocument/definition",
+                "filePath": "sample.py",
+                "line": 2,
+                "character": 3,
+            },
+        ),
+        workspace=tmp_path,
+    )
+
+    assert result.status == "ok"
+    assert captured["server_name"] is None
+    assert captured["method"] == "textDocument/definition"
+    assert captured["workspace"] == tmp_path.resolve()
+    assert captured["params"] == {
+        "textDocument": {"uri": sample_file.resolve().as_uri()},
+        "position": {"line": 1, "character": 2},
+    }

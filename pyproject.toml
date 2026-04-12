@@ -28,6 +28,7 @@ dependencies = [
   "beautifulsoup4",
   "langchain-core",
   "langgraph",
+  "lsprotocol",
   "pydantic",
   "typing-extensions",
   "textual",

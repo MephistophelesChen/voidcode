@@ -11,6 +11,9 @@ from typing import Literal, Protocol, cast
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
+from lsprotocol import converters as lsp_converters
+from lsprotocol import types as lsp_types
+
 from ..lsp import (
     ResolvedLspServerConfig,
     discover_workspace_root,
@@ -142,6 +145,7 @@ class ManagedLspManager:
         }
         self._running_servers: dict[str, _RunningLspServer] = {}
         self._pending_events: list[LspRuntimeEvent] = []
+        self._converter = lsp_converters.get_converter()
 
     @property
     def configuration(self) -> LspConfigState:
@@ -264,27 +268,32 @@ class ManagedLspManager:
         *,
         server_name: str,
     ) -> None:
-        init_params: dict[str, object] = {
-            "processId": os.getpid(),
-            "clientInfo": {"name": "voidcode", "version": "0.1.0"},
-            "locale": "zh-CN",
-            "rootUri": running_server.workspace_root.as_uri(),
-            "workspaceFolders": [
-                {
-                    "uri": running_server.workspace_root.as_uri(),
-                    "name": running_server.workspace_root.name
-                    or str(running_server.workspace_root),
-                }
+        init_params = lsp_types.InitializeParams(
+            process_id=os.getpid(),
+            client_info=lsp_types.ClientInfo(name="voidcode", version="0.1.0"),
+            locale="zh-CN",
+            root_uri=running_server.workspace_root.as_uri(),
+            workspace_folders=[
+                lsp_types.WorkspaceFolder(
+                    uri=running_server.workspace_root.as_uri(),
+                    name=running_server.workspace_root.name or str(running_server.workspace_root),
+                )
             ],
-            "capabilities": {},
-        }
-        if running_server.config.init_options:
-            init_params["initializationOptions"] = dict(running_server.config.init_options)
+            capabilities=lsp_types.ClientCapabilities(),
+            initialization_options=(
+                dict(running_server.config.init_options)
+                if running_server.config.init_options
+                else None
+            ),
+        )
         try:
             response = self._send_request(
                 running_server,
                 method="initialize",
-                params=init_params,
+                params=self._converter.unstructure(
+                    init_params,
+                    unstructure_as=lsp_types.InitializeParams,
+                ),
                 server_name=server_name,
             )
         except ValueError as exc:

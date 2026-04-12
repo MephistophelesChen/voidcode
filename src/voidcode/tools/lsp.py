@@ -6,6 +6,9 @@ import enum
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, cast
 
+from lsprotocol import converters as lsp_converters
+from lsprotocol import types as lsp_types
+
 from .contracts import ToolCall, ToolDefinition, ToolResult
 
 
@@ -49,6 +52,7 @@ class LspTool:
 
     def __init__(self, *, requester: LspRequester) -> None:
         self._requester = requester
+        self._converter = lsp_converters.get_converter()
 
     def invoke(self, call: ToolCall, *, workspace: Path) -> ToolResult:
         op_value = call.arguments.get("operation")
@@ -100,17 +104,29 @@ class LspTool:
         if not candidate.is_file():
             raise ValueError(f"lsp target does not exist: {file_path}")
 
-        position = {"line": line_value - 1, "character": character_value - 1}
-        text_document = {"uri": candidate.as_uri()}
-        params: dict[str, object] = {"textDocument": text_document, "position": position}
+        position = lsp_types.Position(line=line_value - 1, character=character_value - 1)
+        text_document = lsp_types.TextDocumentIdentifier(uri=candidate.as_uri())
+        params: dict[str, object] = self._converter.unstructure(
+            lsp_types.TextDocumentPositionParams(text_document=text_document, position=position),
+            unstructure_as=lsp_types.TextDocumentPositionParams,
+        )
         if operation == LspOperation.WORKSPACE_SYMBOL:
-            params = {"query": ""}
+            params = self._converter.unstructure(
+                lsp_types.WorkspaceSymbolParams(query=""),
+                unstructure_as=lsp_types.WorkspaceSymbolParams,
+            )
 
         if operation in (LspOperation.INCOMING_CALLS, LspOperation.OUTGOING_CALLS):
             prepare_result = self._requester(
                 server_name=server,
                 method=LspOperation.PREPARE_CALL_HIERARCHY.value,
-                params={"textDocument": text_document, "position": position},
+                params=self._converter.unstructure(
+                    lsp_types.TextDocumentPositionParams(
+                        text_document=text_document,
+                        position=position,
+                    ),
+                    unstructure_as=lsp_types.TextDocumentPositionParams,
+                ),
                 workspace=workspace_root,
             )
             prepare_response = prepare_result.response
