@@ -1,13 +1,22 @@
 from __future__ import annotations
 
-import json
+from collections.abc import Mapping
 from pathlib import Path
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from voidcode.runtime.service import ToolRegistry
 from voidcode.tools import ToolCall, WebSearchTool
+
+
+def _json_response(payload: Mapping[str, object]) -> httpx.Response:
+    return httpx.Response(
+        200,
+        json=payload,
+        request=httpx.Request("POST", "https://api.exa.ai/search"),
+    )
 
 
 def test_websearch_tool_rejects_empty_query() -> None:
@@ -37,22 +46,19 @@ def test_websearch_tool_respects_num_results_limit() -> None:
         "results": [{"title": "Example", "url": "https://example.com", "snippet": "snippet"}]
     }
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self) -> bytes:
-            return json.dumps(fake_response).encode("utf-8")
-
-    with patch("urllib.request.urlopen", return_value=_Resp()):
+    with (
+        patch.dict("os.environ", {"EXA_API_KEY": "test-key"}, clear=False),
+        patch(
+            "httpx.Client.post",
+            return_value=_json_response(fake_response),
+        ) as post_mock,
+    ):
         result = tool.invoke(
             ToolCall(tool_name="web_search", arguments={"query": "test", "numResults": 5}),
             workspace=Path("/tmp"),
         )
 
+    post_mock.assert_called_once()
     assert result.data["num_results"] == 5
 
 
@@ -63,17 +69,13 @@ def test_websearch_tool_defaults_to_8_results() -> None:
         "results": [{"title": "Example", "url": "https://example.com", "snippet": "snippet"}]
     }
 
-    class _Resp:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, exc_type, exc, tb):
-            return False
-
-        def read(self) -> bytes:
-            return json.dumps(fake_response).encode("utf-8")
-
-    with patch("urllib.request.urlopen", return_value=_Resp()):
+    with (
+        patch.dict("os.environ", {"EXA_API_KEY": "test-key"}, clear=False),
+        patch(
+            "httpx.Client.post",
+            return_value=_json_response(fake_response),
+        ),
+    ):
         result = tool.invoke(
             ToolCall(tool_name="web_search", arguments={"query": "test"}),
             workspace=Path("/tmp"),

@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import json
+import os
 import re
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import ClassVar
+
+import httpx
 
 from .contracts import ToolCall, ToolDefinition, ToolResult
 
@@ -14,13 +14,7 @@ DEFAULT_TIMEOUT = 30
 
 
 def _search_exa(query: str, num_results: int = DEFAULT_NUM_RESULTS) -> str | None:
-    try:
-        import os
-
-        api_key = os.environ.get("EXA_API_KEY")
-    except Exception:
-        api_key = None
-
+    api_key = os.environ.get("EXA_API_KEY")
     if not api_key:
         return None
 
@@ -31,35 +25,34 @@ def _search_exa(query: str, num_results: int = DEFAULT_NUM_RESULTS) -> str | Non
             "type": "neural",
         }
 
-        req = urllib.request.Request(
-            "https://api.exa.ai/search",
-            data=json.dumps(request_data).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-                "Authorization": f"Bearer {api_key}",
-            },
-            method="POST",
-        )
+        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+            response = client.post(
+                "https://api.exa.ai/search",
+                json=request_data,
+                headers={
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+            )
+            response.raise_for_status()
+            data = response.json()
 
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as response:
-            data = json.loads(response.read().decode("utf-8"))
+        if "results" in data:
+            results = data["results"]
+            output_lines: list[str] = []
 
-            if "results" in data:
-                results = data["results"]
-                output_lines: list[str] = []
+            for i, result in enumerate(results[:num_results], 1):
+                title = result.get("title", "Untitled")
+                url = result.get("url", "")
+                snippet = result.get("snippet", "")
 
-                for i, result in enumerate(results[:num_results], 1):
-                    title = result.get("title", "Untitled")
-                    url = result.get("url", "")
-                    snippet = result.get("snippet", "")
+                output_lines.append(f"{i}. {title}")
+                output_lines.append(f"   {url}")
+                if snippet:
+                    output_lines.append(f"   {snippet[:200]}...")
+                output_lines.append("")
 
-                    output_lines.append(f"{i}. {title}")
-                    output_lines.append(f"   {url}")
-                    if snippet:
-                        output_lines.append(f"   {snippet[:200]}...")
-                    output_lines.append("")
-
-                return "\n".join(output_lines)
+            return "\n".join(output_lines)
 
     except Exception:
         pass
@@ -68,47 +61,45 @@ def _search_exa(query: str, num_results: int = DEFAULT_NUM_RESULTS) -> str | Non
 
 
 def _search_fallback(query: str, num_results: int = DEFAULT_NUM_RESULTS) -> str:
-    encoded_query = urllib.parse.quote(query)
-    url = f"https://html.duckduckgo.com/html/?q={encoded_query}&kl=wt-wt"
+    url = "https://html.duckduckgo.com/html/"
 
     try:
-        req = urllib.request.Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 (compatible; VoidCode/1.0)",
-            },
-        )
+        with httpx.Client(timeout=DEFAULT_TIMEOUT) as client:
+            response = client.get(
+                url,
+                params={"q": query, "kl": "wt-wt"},
+                headers={
+                    "User-Agent": "Mozilla/5.0 (compatible; VoidCode/1.0)",
+                },
+            )
+            response.raise_for_status()
+            html = response.text
 
-        with urllib.request.urlopen(req, timeout=DEFAULT_TIMEOUT) as response:
-            html = response.read().decode("utf-8", errors="replace")
+        results: list[tuple[str, str, str]] = []
+        pattern = r'<a class="result__a" href="([^"]+)"[^>]*>([^<]+)</a>'
+        snippet_pattern = r'<a class="result__snippet"[^>]*>([^<]+)</a>'
 
-            results: list[tuple[str, str, str]] = []
-            pattern = r'<a class="result__a" href="([^"]+)"[^>]*>([^<]+)</a>'
-            snippet_pattern = r'<a class="result__snippet"[^>]*>([^<]+)</a>'
+        for match in re.finditer(pattern, html):
+            url_match = match.group(1)
+            title = match.group(2).strip()
+            snippet_match = re.search(snippet_pattern, html[match.start() : match.start() + 500])
+            snippet = snippet_match.group(1).strip() if snippet_match else ""
 
-            for match in re.finditer(pattern, html):
-                url_match = match.group(1)
-                title = match.group(2).strip()
-                snippet_match = re.search(
-                    snippet_pattern, html[match.start() : match.start() + 500]
-                )
-                snippet = snippet_match.group(1).strip() if snippet_match else ""
+            results.append((title, url_match, snippet))
 
-                results.append((title, url_match, snippet))
+            if len(results) >= num_results:
+                break
 
-                if len(results) >= num_results:
-                    break
-
-            if results:
-                output_lines: list[str] = []
-                for i, (title, url, snippet) in enumerate(results, 1):
-                    output_lines.append(f"{i}. {title}")
-                    output_lines.append(f"   {url}")
-                    if snippet:
-                        clean_snippet = re.sub(r"<[^>]+>", "", snippet)
-                        output_lines.append(f"   {clean_snippet[:200]}...")
-                    output_lines.append("")
-                return "\n".join(output_lines)
+        if results:
+            output_lines: list[str] = []
+            for i, (title, result_url, snippet) in enumerate(results, 1):
+                output_lines.append(f"{i}. {title}")
+                output_lines.append(f"   {result_url}")
+                if snippet:
+                    clean_snippet = re.sub(r"<[^>]+>", "", snippet)
+                    output_lines.append(f"   {clean_snippet[:200]}...")
+                output_lines.append("")
+            return "\n".join(output_lines)
 
     except Exception:
         pass

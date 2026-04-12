@@ -4,12 +4,12 @@ import base64
 import ipaddress
 import re
 import socket
-import urllib.error
 import urllib.parse
-import urllib.request
-from http.client import HTTPMessage
 from pathlib import Path
-from typing import IO, ClassVar, cast
+from typing import ClassVar
+
+import httpx
+from bs4 import BeautifulSoup
 
 from .contracts import ToolCall, ToolDefinition, ToolResult
 
@@ -75,95 +75,20 @@ def _validate_fetch_url(url_value: str) -> None:
         raise ValueError("web_fetch target host is blocked for security reasons")
 
 
-class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
-    def redirect_request(
-        self,
-        req: urllib.request.Request,
-        fp: object,
-        code: int,
-        msg: str,
-        headers: object,
-        newurl: str,
-    ) -> urllib.request.Request | None:
-        _validate_fetch_url(newurl)
-        return super().redirect_request(
-            req,
-            cast(IO[bytes], fp),
-            code,
-            msg,
-            cast(HTTPMessage, headers),
-            newurl,
-        )
-
-
 def _extract_text_from_html(html: str) -> str:
-    text: list[str] = []
-    skip_content = False
+    soup = BeautifulSoup(html, "html.parser")
 
-    script_style_tags = {"script", "style", "noscript", "iframe", "object", "embed"}
-    tag_stack: list[str] = []
+    for tag_name in ("script", "style", "noscript", "iframe", "object", "embed"):
+        for tag in soup.find_all(tag_name):
+            tag.decompose()
 
-    i = 0
-    while i < len(html):
-        if html[i] == "<":
-            if html.startswith("<!--", i):
-                end_comment = html.find("-->", i + 4)
-                if end_comment == -1:
-                    break
-                i = end_comment + 3
-                continue
+    for tag in soup.find_all(["br", "li", "p", "div", "section", "article", "tr"]):
+        tag.append("\n")
 
-            j = html.find(">", i)
-            if j == -1:
-                text.append(html[i:])
-                break
-
-            tag_raw = html[i + 1 : j].strip()
-            if not tag_raw:
-                i = j + 1
-                continue
-
-            parts = tag_raw.split()
-            if not parts:
-                i = j + 1
-                continue
-            tag = parts[0].lower().rstrip("/")
-
-            if tag.startswith("!"):
-                i = j + 1
-                continue
-
-            is_closing = tag.startswith("/")
-            clean_tag = tag.lstrip("/")
-
-            if is_closing and tag_stack and tag_stack[-1] == clean_tag:
-                tag_stack.pop()
-                if clean_tag in script_style_tags:
-                    skip_content = False
-            elif not is_closing:
-                tag_stack.append(clean_tag)
-                if clean_tag in script_style_tags:
-                    skip_content = True
-
-            if not skip_content:
-                if (
-                    html[i : i + 7] == "<br"
-                    or html[i : i + 9] == "<br/>"
-                    or html[i : i + 10] == "<br />"
-                ):
-                    text.append("\n")
-
-            i = j + 1
-            continue
-
-        if not skip_content and i < len(html):
-            text.append(html[i])
-
-        i += 1
-
-    result = "".join(text)
+    result = soup.get_text(separator=" ")
     result = re.sub(r"\n{3,}", "\n\n", result)
     result = re.sub(r"[ \t]+", " ", result)
+    result = re.sub(r" *\n *", "\n", result)
     return result.strip()
 
 
@@ -211,6 +136,7 @@ class WebFetchTool:
     )
 
     def invoke(self, call: ToolCall, *, workspace: Path) -> ToolResult:
+        _ = workspace
         url_value = call.arguments.get("url")
         if not isinstance(url_value, str):
             raise ValueError("web_fetch requires a string url argument")
@@ -230,76 +156,89 @@ class WebFetchTool:
         content: str = ""
         data: bytes = b""
         mime: str = ""
-        opener = urllib.request.build_opener(_SafeRedirectHandler())
+
+        # Build Accept header according to requested format to be friendlier for servers
+        accept_by_format = {
+            "markdown": (
+                "text/markdown;q=1.0, text/x-markdown;q=0.9, "
+                "text/plain;q=0.8, text/html;q=0.7, */*;q=0.1"
+            ),
+            "text": ("text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1"),
+            "html": (
+                "text/html;q=1.0, application/xhtml+xml;q=0.9, "
+                "text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
+            ),
+        }
+
+        accept_header = accept_by_format.get(format_value, "*/*")
+
+        # Use a more realistic User-Agent to avoid bot detection on some servers
+        ua = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "VoidCode/1.0 Chrome/110.0.5481.100 Safari/537.36"
+        )
+
+        headers = {
+            "User-Agent": ua,
+            "Accept": accept_header,
+        }
+
+        current_url = url_value
+        max_redirects = 5
 
         try:
-            # Build Accept header according to requested format to be friendlier for servers
-            accept_by_format = {
-                "markdown": (
-                    "text/markdown;q=1.0, text/x-markdown;q=0.9, "
-                    "text/plain;q=0.8, text/html;q=0.7, */*;q=0.1"
-                ),
-                "text": ("text/plain;q=1.0, text/markdown;q=0.9, text/html;q=0.8, */*;q=0.1"),
-                "html": (
-                    "text/html;q=1.0, application/xhtml+xml;q=0.9, "
-                    "text/plain;q=0.8, text/markdown;q=0.7, */*;q=0.1"
-                ),
-            }
+            with httpx.Client(timeout=timeout, follow_redirects=False) as client:
+                for _ in range(max_redirects + 1):
+                    response = client.request("GET", current_url, headers=headers)
 
-            accept_header = accept_by_format.get(format_value, "*/*")
+                    if response.is_redirect:
+                        location = response.headers.get("Location")
+                        if not location:
+                            raise ValueError(
+                                "Failed to fetch URL: redirect response missing location"
+                            )
+                        redirected_url = urllib.parse.urljoin(current_url, location)
+                        _validate_fetch_url(redirected_url)
+                        current_url = redirected_url
+                        continue
 
-            # Use a more realistic User-Agent to avoid bot detection on some servers
-            ua = (
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "VoidCode/1.0 Chrome/110.0.5481.100 Safari/537.36"
-            )
+                    if response.status_code >= 400:
+                        raise ValueError(
+                            f"HTTP error {response.status_code}: {response.reason_phrase}"
+                        )
 
-            req = urllib.request.Request(
-                url_value,
-                headers={
-                    "User-Agent": ua,
-                    "Accept": accept_header,
-                },
-            )
+                    final_url = str(response.url)
+                    _validate_fetch_url(final_url)
+                    content_type = response.headers.get("Content-Type", "")
+                    content_length = response.headers.get("Content-Length")
 
-            with opener.open(req, timeout=timeout) as response:
-                final_url = response.geturl()
-                _validate_fetch_url(final_url)
-                content_type = response.headers.get("Content-Type", "")
-                content_length = response.headers.get("Content-Length")
+                    if content_length:
+                        try:
+                            parsed_length = int(content_length)
+                        except (TypeError, ValueError):
+                            parsed_length = None
+                        if parsed_length is not None and parsed_length > MAX_RESPONSE_SIZE:
+                            limit_mb = MAX_RESPONSE_SIZE // 1024 // 1024
+                            raise ValueError(f"Response too large (exceeds {limit_mb}MB limit)")
 
-                if content_length:
-                    try:
-                        parsed_length = int(content_length)
-                    except (TypeError, ValueError):
-                        parsed_length = None
-                    if parsed_length is not None and parsed_length > MAX_RESPONSE_SIZE:
-                        limit_mb = MAX_RESPONSE_SIZE // 1024 // 1024
-                        raise ValueError(f"Response too large (exceeds {limit_mb}MB limit)")
+                    total = 0
+                    chunks: list[bytes] = []
+                    for chunk in response.iter_bytes():
+                        total += len(chunk)
+                        if total > MAX_RESPONSE_SIZE:
+                            limit_mb = MAX_RESPONSE_SIZE // 1024 // 1024
+                            raise ValueError(f"Response too large (exceeds {limit_mb}MB limit)")
+                        chunks.append(chunk)
 
-                chunks: list[bytes] = []
-                total = 0
-                chunk_size = 64 * 1024
-                while True:
-                    chunk = response.read(chunk_size)
-                    if not chunk:
-                        break
-                    total += len(chunk)
-                    if total > MAX_RESPONSE_SIZE:
-                        limit_mb = MAX_RESPONSE_SIZE // 1024 // 1024
-                        raise ValueError(f"Response too large (exceeds {limit_mb}MB limit)")
-                    chunks.append(chunk)
-
-                data = b"".join(chunks)
-
-                content = data.decode("utf-8", errors="replace")
-                mime = content_type.split(";")[0].strip().lower() if content_type else ""
-
-        except urllib.error.HTTPError as exc:
-            raise ValueError(f"HTTP error {exc.code}: {exc.reason}") from exc
-        except urllib.error.URLError as exc:
-            raise ValueError(f"Failed to fetch URL: {exc.reason}") from exc
+                    data = b"".join(chunks)
+                    content = data.decode("utf-8", errors="replace")
+                    mime = content_type.split(";")[0].strip().lower() if content_type else ""
+                    break
+                else:
+                    raise ValueError("Failed to fetch URL: too many redirects")
+        except httpx.HTTPError as exc:
+            raise ValueError(f"Failed to fetch URL: {exc}") from exc
 
         # Normal post-fetch processing (outside of except blocks)
         if format_value == "html":

@@ -1,56 +1,32 @@
 from __future__ import annotations
 
 from pathlib import Path
-from types import TracebackType
 from typing import cast
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 from voidcode.runtime.service import ToolRegistry
 from voidcode.tools import ToolCall, WebFetchTool
 
 
-class _StubResponse:
-    def __init__(
-        self,
-        *,
-        content: bytes,
-        content_type: str = "text/html; charset=utf-8",
-        final_url: str = "https://example.com",
-    ) -> None:
-        self._content = content
-        self.headers = {"Content-Type": content_type, "Content-Length": str(len(content))}
-        self._final_url = final_url
-
-    def __enter__(self) -> _StubResponse:
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        tb: TracebackType | None,
-    ) -> bool:
-        return False
-
-    def read(self, size: int = -1) -> bytes:
-        if size < 0:
-            data = self._content
-            self._content = b""
-            return data
-        data = self._content[:size]
-        self._content = self._content[size:]
-        return data
-
-    def geturl(self) -> str:
-        return self._final_url
-
-
-class _BadLengthResponse(_StubResponse):
-    def __init__(self, *, content: bytes, content_type: str = "text/html") -> None:
-        super().__init__(content=content, content_type=content_type)
-        self.headers = {"Content-Type": content_type, "Content-Length": "abc"}
+def _response(
+    *,
+    content: bytes,
+    content_type: str = "text/html; charset=utf-8",
+    final_url: str = "https://example.com",
+    content_length: str | None = None,
+) -> httpx.Response:
+    return httpx.Response(
+        200,
+        headers={
+            "Content-Type": content_type,
+            "Content-Length": content_length if content_length is not None else str(len(content)),
+        },
+        content=content,
+        request=httpx.Request("GET", final_url),
+    )
 
 
 def test_webfetch_tool_rejects_invalid_url() -> None:
@@ -96,7 +72,7 @@ def test_tools_package_and_default_registry_export_webfetch_tool() -> None:
 def test_webfetch_markdown_uses_markdown_conversion_for_html() -> None:
     tool = WebFetchTool()
     html = b"<html><body><h1>TITLE</h1><p>Hello</p></body></html>"
-    with patch("urllib.request.OpenerDirector.open", return_value=_StubResponse(content=html)):
+    with patch("httpx.Client.request", return_value=_response(content=html)) as request_mock:
         result = tool.invoke(
             ToolCall(
                 tool_name="web_fetch",
@@ -105,6 +81,7 @@ def test_webfetch_markdown_uses_markdown_conversion_for_html() -> None:
             workspace=Path("/tmp"),
         )
 
+    request_mock.assert_called_once()
     assert result.status == "ok"
     assert result.content is not None
     assert "# Title" in result.content or "TITLE" in result.content
@@ -113,7 +90,7 @@ def test_webfetch_markdown_uses_markdown_conversion_for_html() -> None:
 def test_webfetch_tolerates_malformed_html() -> None:
     tool = WebFetchTool()
     malformed = b"<html><body>Hello <broken"
-    with patch("urllib.request.OpenerDirector.open", return_value=_StubResponse(content=malformed)):
+    with patch("httpx.Client.request", return_value=_response(content=malformed)):
         result = tool.invoke(
             ToolCall(
                 tool_name="web_fetch", arguments={"url": "https://example.com", "format": "text"}
@@ -126,12 +103,30 @@ def test_webfetch_tolerates_malformed_html() -> None:
     assert "Hello" in result.content
 
 
+def test_webfetch_text_preserves_list_item_separation() -> None:
+    tool = WebFetchTool()
+    html = b"<html><body><ul><li>Alpha</li><li>Beta</li></ul></body></html>"
+    with patch("httpx.Client.request", return_value=_response(content=html)):
+        result = tool.invoke(
+            ToolCall(
+                tool_name="web_fetch", arguments={"url": "https://example.com", "format": "text"}
+            ),
+            workspace=Path("/tmp"),
+        )
+
+    assert result.status == "ok"
+    assert isinstance(result.content, str)
+    assert "AlphaBeta" not in result.content
+    assert "Alpha" in result.content
+    assert "Beta" in result.content
+
+
 def test_webfetch_returns_attachment_for_image() -> None:
     tool = WebFetchTool()
     image_bytes = b"\x89PNG\r\n\x1a\n" + b"fakepngdata"
     with patch(
-        "urllib.request.OpenerDirector.open",
-        return_value=_StubResponse(content=image_bytes, content_type="image/png"),
+        "httpx.Client.request",
+        return_value=_response(content=image_bytes, content_type="image/png"),
     ):
         result = tool.invoke(
             ToolCall(
@@ -166,7 +161,10 @@ def test_webfetch_rejects_localhost_targets() -> None:
 def test_webfetch_tolerates_invalid_content_length_header() -> None:
     tool = WebFetchTool()
     html = b"<html><body>ok</body></html>"
-    with patch("urllib.request.OpenerDirector.open", return_value=_BadLengthResponse(content=html)):
+    with patch(
+        "httpx.Client.request",
+        return_value=_response(content=html, content_type="text/html", content_length="abc"),
+    ):
         result = tool.invoke(
             ToolCall(
                 tool_name="web_fetch",
@@ -183,8 +181,8 @@ def test_webfetch_rejects_redirect_to_localhost() -> None:
     tool = WebFetchTool()
 
     with patch(
-        "urllib.request.OpenerDirector.open",
-        return_value=_StubResponse(content=b"ok", final_url="http://127.0.0.1:8080/internal"),
+        "httpx.Client.request",
+        return_value=_response(content=b"ok", final_url="http://127.0.0.1:8080/internal"),
     ):
         with pytest.raises(ValueError, match="blocked"):
             tool.invoke(

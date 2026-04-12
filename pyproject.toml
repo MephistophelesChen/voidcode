@@ -25,11 +25,13 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Application Frameworks",
 ]
 dependencies = [
+  "beautifulsoup4",
   "langchain-core",
   "langgraph",
   "pydantic",
   "typing-extensions",
   "textual",
+  "httpx",
   "uvicorn",
 ]
 

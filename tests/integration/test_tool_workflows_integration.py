@@ -4,10 +4,10 @@ import subprocess
 import sys
 import urllib.error
 from pathlib import Path
-from types import TracebackType
 from typing import cast
 from unittest.mock import patch
 
+import httpx
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
@@ -223,22 +223,13 @@ def test_web_search_tool_uses_fallback_when_no_exa_key_integration(tmp_path: Pat
         '<a class="result__snippet">Snippet A</a>'
     )
 
-    class _Resp:
-        def __enter__(self):
-            return self
+    response = httpx.Response(
+        200,
+        text=html,
+        request=httpx.Request("GET", "https://html.duckduckgo.com/html/?q=voidcode+tools&kl=wt-wt"),
+    )
 
-        def __exit__(
-            self,
-            exc_type: type[BaseException] | None,
-            exc: BaseException | None,
-            tb: TracebackType | None,
-        ) -> bool:
-            return False
-
-        def read(self) -> bytes:
-            return html.encode("utf-8")
-
-    with patch("urllib.request.urlopen", return_value=_Resp()):
+    with patch("httpx.Client.get", return_value=response):
         result = tool.invoke(
             ToolCall(tool_name="web_search", arguments={"query": "voidcode tools"}),
             workspace=Path("."),
