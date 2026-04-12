@@ -11,6 +11,7 @@ from voidcode.runtime.config import (
     MODEL_ENV_VAR,
     RUNTIME_CONFIG_FILE_NAME,
     RuntimeAcpConfig,
+    RuntimeFormatterPresetConfig,
     RuntimeHooksConfig,
     RuntimeLspConfig,
     RuntimeLspServerConfig,
@@ -182,6 +183,138 @@ def test_runtime_config_parses_minimal_hook_commands(tmp_path: Path) -> None:
         enabled=True,
         pre_tool=(("python", "scripts/pre.py"),),
         post_tool=(("python", "scripts/post.py"),),
+    )
+
+
+def test_runtime_config_parses_formatter_preset_hooks(tmp_path: Path) -> None:
+    runtime_config_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                    "formatter_presets": {
+                        "python": {"command": ["ruff", "format"]},
+                        "typescript": {"command": ["prettier", "--write"]},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config(tmp_path, env={})
+
+    assert config.hooks == RuntimeHooksConfig(
+        enabled=True,
+        formatter_presets={
+            "python": RuntimeFormatterPresetConfig(command=("ruff", "format")),
+            "javascript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "json": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "markdown": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "yaml": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "rust": RuntimeFormatterPresetConfig(command=("rustfmt",)),
+            "go": RuntimeFormatterPresetConfig(command=("gofmt",)),
+            "typescript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        },
+    )
+
+
+def test_runtime_hooks_config_defaults_formatter_presets_to_common_language_builtins() -> None:
+    assert RuntimeHooksConfig().formatter_presets == {
+        "python": RuntimeFormatterPresetConfig(command=("ruff", "format")),
+        "typescript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        "javascript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        "json": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        "markdown": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        "yaml": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+        "rust": RuntimeFormatterPresetConfig(command=("rustfmt",)),
+        "go": RuntimeFormatterPresetConfig(command=("gofmt",)),
+    }
+
+
+def test_runtime_config_keeps_builtin_formatter_presets_when_hooks_formatter_presets_missing(
+    tmp_path: Path,
+) -> None:
+    runtime_config_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config(tmp_path, env={})
+
+    assert config.hooks == RuntimeHooksConfig(enabled=True)
+
+
+def test_runtime_config_overrides_builtin_formatter_preset_with_user_value(tmp_path: Path) -> None:
+    runtime_config_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                    "formatter_presets": {
+                        "python": {"command": ["uvx", "ruff", "format"]},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config(tmp_path, env={})
+
+    assert config.hooks == RuntimeHooksConfig(
+        enabled=True,
+        formatter_presets={
+            "python": RuntimeFormatterPresetConfig(command=("uvx", "ruff", "format")),
+            "typescript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "javascript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "json": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "markdown": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "yaml": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "rust": RuntimeFormatterPresetConfig(command=("rustfmt",)),
+            "go": RuntimeFormatterPresetConfig(command=("gofmt",)),
+        },
+    )
+
+
+def test_runtime_config_keeps_builtin_formatter_presets_when_adding_custom_user_preset(
+    tmp_path: Path,
+) -> None:
+    runtime_config_path(tmp_path).write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "enabled": True,
+                    "formatter_presets": {
+                        "toml": {"command": ["taplo", "fmt"]},
+                    },
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = load_runtime_config(tmp_path, env={})
+
+    assert config.hooks == RuntimeHooksConfig(
+        enabled=True,
+        formatter_presets={
+            "python": RuntimeFormatterPresetConfig(command=("ruff", "format")),
+            "typescript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "javascript": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "json": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "markdown": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "yaml": RuntimeFormatterPresetConfig(command=("prettier", "--write")),
+            "rust": RuntimeFormatterPresetConfig(command=("rustfmt",)),
+            "go": RuntimeFormatterPresetConfig(command=("gofmt",)),
+            "toml": RuntimeFormatterPresetConfig(command=("taplo", "fmt")),
+        },
     )
 
 
@@ -366,6 +499,26 @@ def test_runtime_config_rejects_invalid_max_steps(
             cast(dict[str, object], {"hooks": {"post_tool": [["echo", "hello"], []]}}),
             "runtime config field 'hooks.post_tool\\[1\\]'.*at least one string",
             id="hooks-post-tool-empty-command",
+        ),
+        pytest.param(
+            {"hooks": {"formatter_presets": []}},
+            "runtime config field 'hooks.formatter_presets'",
+            id="hooks-formatter-presets-shape",
+        ),
+        pytest.param(
+            {"hooks": {"formatter_presets": {"python": []}}},
+            "runtime config field 'hooks.formatter_presets.python'",
+            id="hooks-formatter-preset-shape",
+        ),
+        pytest.param(
+            {"hooks": {"formatter_presets": {"python": {"command": []}}}},
+            "runtime config field 'hooks.formatter_presets.python.command'.*at least one string",
+            id="hooks-formatter-preset-command-empty",
+        ),
+        pytest.param(
+            {"hooks": {"formatter_presets": {"python": {"command": [False]}}}},
+            "runtime config field 'hooks.formatter_presets.python.command\\[0\\]'",
+            id="hooks-formatter-preset-command-item-type",
         ),
     ],
 )
