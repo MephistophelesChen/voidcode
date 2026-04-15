@@ -138,8 +138,36 @@ class RuntimeMcpConfig:
 
 @dataclass(frozen=True, slots=True)
 class RuntimeTuiConfig:
-    leader_key: str = "alt+x"
+    leader_key: str | None = None
     keymap: Mapping[str, str] | None = None
+    preferences: RuntimeTuiPreferences | None = None
+
+
+type RuntimeTuiThemeMode = Literal["auto", "light", "dark"]
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTuiThemePreferences:
+    name: str | None = None
+    mode: RuntimeTuiThemeMode | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTuiReadingPreferences:
+    wrap: bool | None = None
+    sidebar_collapsed: bool | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RuntimeTuiPreferences:
+    theme: RuntimeTuiThemePreferences | None = None
+    reading: RuntimeTuiReadingPreferences | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class EffectiveRuntimeTuiPreferences:
+    theme: RuntimeTuiThemePreferences
+    reading: RuntimeTuiReadingPreferences
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,8 +214,58 @@ class RuntimeConfigOverrides:
     plan: RuntimePlanConfig | None = None
 
 
+_VALID_TUI_THEME_MODES: tuple[RuntimeTuiThemeMode, ...] = ("auto", "light", "dark")
+_BUILTIN_TUI_THEME_DEFAULTS: dict[RuntimeTuiThemeMode, str] = {
+    "auto": "textual-dark",
+    "light": "textual-light",
+    "dark": "textual-dark",
+}
+_BUILTIN_TEXTUAL_LIGHT_THEMES: frozenset[str] = frozenset(
+    {"textual-light", "solarized-light", "atom-one-light"}
+)
+_BUILTIN_TEXTUAL_DARK_THEMES: frozenset[str] = frozenset(
+    {
+        "textual-dark",
+        "nord",
+        "gruvbox",
+        "textual-ansi",
+        "dracula",
+        "tokyo-night",
+        "monokai",
+        "atom-one-dark",
+    }
+)
+
+
 def runtime_config_path(workspace: Path) -> Path:
     return workspace / RUNTIME_CONFIG_FILE_NAME
+
+
+def user_runtime_config_path() -> Path:
+    config_home = os.environ.get("XDG_CONFIG_HOME")
+    if config_home:
+        return Path(config_home).expanduser() / "voidcode" / "config.json"
+    return Path.home() / ".config" / "voidcode" / "config.json"
+
+
+def load_global_tui_preferences(
+    env: Mapping[str, str] | None = None,
+) -> RuntimeTuiPreferences | None:
+    environment: Mapping[str, str] = os.environ if env is None else env
+    global_config = _load_user_config(environment)
+    if global_config.tui is None:
+        return None
+    return global_config.tui.preferences
+
+
+def load_workspace_tui_preferences(
+    workspace: Path, env: Mapping[str, str] | None = None
+) -> RuntimeTuiPreferences | None:
+    environment: Mapping[str, str] = os.environ if env is None else env
+    repo_local = _load_repo_local_config(workspace.resolve(), env=environment)
+    if repo_local.tui is None:
+        return None
+    return repo_local.tui.preferences
 
 
 def load_runtime_config(
@@ -202,7 +280,9 @@ def load_runtime_config(
     resolved_workspace = workspace.resolve()
     environment: Mapping[str, str] = os.environ if env is None else env
     env_overrides = _load_environment_runtime_config(environment)
+    global_config = _load_user_config(environment)
     repo_local = _load_repo_local_config(resolved_workspace, env=environment)
+    resolved_tui = _resolve_tui_config(global_config.tui, repo_local.tui)
 
     return RuntimeConfig(
         approval_mode=_resolve_approval_mode(
@@ -231,7 +311,7 @@ def load_runtime_config(
         lsp=repo_local.lsp,
         acp=repo_local.acp,
         mcp=repo_local.mcp,
-        tui=repo_local.tui,
+        tui=resolved_tui,
         provider_fallback=repo_local.provider_fallback,
         providers=repo_local.providers,
         plan=repo_local.plan,
@@ -327,6 +407,32 @@ def _load_repo_local_config(
         providers=providers,
         plan=plan,
     )
+
+
+def _load_user_config(env: Mapping[str, str]) -> RuntimeConfigOverrides:
+    config_path = _user_runtime_config_path_from_env(env)
+    if not config_path.exists():
+        return RuntimeConfigOverrides()
+
+    try:
+        raw_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"runtime config file must contain valid JSON: {config_path}") from exc
+
+    if not isinstance(raw_payload, dict):
+        raise ValueError(f"runtime config file must contain a JSON object: {config_path}")
+
+    payload = cast(dict[str, object], raw_payload)
+    raw_tui = payload.get("tui")
+    tui = _parse_tui_config(raw_tui)
+    return RuntimeConfigOverrides(tui=tui)
+
+
+def _user_runtime_config_path_from_env(env: Mapping[str, str]) -> Path:
+    config_home = env.get("XDG_CONFIG_HOME") or os.environ.get("XDG_CONFIG_HOME")
+    if config_home:
+        return Path(config_home).expanduser() / "voidcode" / "config.json"
+    return Path.home() / ".config" / "voidcode" / "config.json"
 
 
 def _parse_hooks_config(raw_hooks: object) -> RuntimeHooksConfig | None:
@@ -568,14 +674,26 @@ class _RuntimeMcpValidationModel(BaseModel):
 
 
 class _RuntimeTuiValidationModel(BaseModel):
-    leader_key: str = "alt+x"
+    leader_key: str | None = None
     keymap: dict[str, str] | None = None
+    preferences: _RuntimeTuiPreferencesValidationModel | None = None
+
+    @field_validator("preferences", mode="before")
+    @classmethod
+    def _validate_preferences(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                "runtime config field 'tui.preferences' must be an object when provided"
+            )
+        return cast(dict[str, object], value)
 
     @field_validator("leader_key", mode="before")
     @classmethod
-    def _validate_leader_key(cls, value: object) -> str:
+    def _validate_leader_key(cls, value: object) -> str | None:
         if value is None:
-            return "alt+x"
+            return None
         if not isinstance(value, str):
             raise ValueError("runtime config field 'tui.leader_key' must be a string when provided")
         return value
@@ -605,7 +723,110 @@ class _RuntimeTuiValidationModel(BaseModel):
         return parsed_keymap
 
     def to_runtime_config(self) -> RuntimeTuiConfig:
-        return RuntimeTuiConfig(leader_key=self.leader_key, keymap=self.keymap)
+        return RuntimeTuiConfig(
+            leader_key=self.leader_key,
+            keymap=self.keymap,
+            preferences=(
+                self.preferences.to_runtime_config() if self.preferences is not None else None
+            ),
+        )
+
+
+class _RuntimeTuiThemePreferencesValidationModel(BaseModel):
+    name: str | None = None
+    mode: RuntimeTuiThemeMode | None = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _validate_name(cls, value: object) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError(
+                "runtime config field 'tui.preferences.theme.name' must be a string when provided"
+            )
+        return value
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _validate_mode(cls, value: object) -> RuntimeTuiThemeMode | None:
+        if value is None:
+            return None
+        if value not in _VALID_TUI_THEME_MODES:
+            allowed = ", ".join(_VALID_TUI_THEME_MODES)
+            raise ValueError(
+                f"runtime config field 'tui.preferences.theme.mode' must be one of: {allowed}"
+            )
+        return value
+
+    def to_runtime_config(self) -> RuntimeTuiThemePreferences:
+        return RuntimeTuiThemePreferences(name=self.name, mode=self.mode)
+
+
+class _RuntimeTuiReadingPreferencesValidationModel(BaseModel):
+    wrap: bool | None = None
+    sidebar_collapsed: bool | None = None
+
+    @field_validator("wrap", mode="before")
+    @classmethod
+    def _validate_wrap(cls, value: object) -> bool | None:
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            raise ValueError(
+                "runtime config field 'tui.preferences.reading.wrap' must be a boolean when provided"  # noqa: E501
+            )
+        return value
+
+    @field_validator("sidebar_collapsed", mode="before")
+    @classmethod
+    def _validate_sidebar_collapsed(cls, value: object) -> bool | None:
+        if value is None:
+            return None
+        if not isinstance(value, bool):
+            raise ValueError(
+                "runtime config field 'tui.preferences.reading.sidebar_collapsed' must be a boolean when provided"  # noqa: E501
+            )
+        return value
+
+    def to_runtime_config(self) -> RuntimeTuiReadingPreferences:
+        return RuntimeTuiReadingPreferences(
+            wrap=self.wrap,
+            sidebar_collapsed=self.sidebar_collapsed,
+        )
+
+
+class _RuntimeTuiPreferencesValidationModel(BaseModel):
+    theme: _RuntimeTuiThemePreferencesValidationModel | None = None
+    reading: _RuntimeTuiReadingPreferencesValidationModel | None = None
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _validate_theme(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                "runtime config field 'tui.preferences.theme' must be an object when provided"
+            )
+        return cast(dict[str, object], value)
+
+    @field_validator("reading", mode="before")
+    @classmethod
+    def _validate_reading(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, dict):
+            raise ValueError(
+                "runtime config field 'tui.preferences.reading' must be an object when provided"
+            )
+        return cast(dict[str, object], value)
+
+    def to_runtime_config(self) -> RuntimeTuiPreferences:
+        return RuntimeTuiPreferences(
+            theme=self.theme.to_runtime_config() if self.theme is not None else None,
+            reading=self.reading.to_runtime_config() if self.reading is not None else None,
+        )
 
 
 class _RuntimeConfigOutput(Protocol):
@@ -628,10 +849,13 @@ def _parse_tools_config(raw_tools: object) -> RuntimeToolsConfig | None:
         raise ValueError("runtime config field 'tools' must be an object when provided")
 
     tools_payload = cast(dict[str, object], raw_tools)
-    return _parse_runtime_config_section(
-        tools_payload,
-        field_path="tools",
-        model_type=_RuntimeToolsValidationModel,
+    return cast(
+        RuntimeToolsConfig | None,
+        _parse_runtime_config_section(
+            tools_payload,
+            field_path="tools",
+            model_type=_RuntimeToolsValidationModel,
+        ),
     )
 
 
@@ -642,10 +866,13 @@ def _parse_skills_config(raw_skills: object) -> RuntimeSkillsConfig | None:
         raise ValueError("runtime config field 'skills' must be an object when provided")
 
     skills_payload = cast(dict[str, object], raw_skills)
-    return _parse_runtime_config_section(
-        skills_payload,
-        field_path="skills",
-        model_type=_RuntimeSkillsValidationModel,
+    return cast(
+        RuntimeSkillsConfig | None,
+        _parse_runtime_config_section(
+            skills_payload,
+            field_path="skills",
+            model_type=_RuntimeSkillsValidationModel,
+        ),
     )
 
 
@@ -741,10 +968,13 @@ def _parse_acp_config(raw_acp: object) -> RuntimeAcpConfig | None:
         raise ValueError("runtime config field 'acp' must be an object when provided")
 
     acp_payload = cast(dict[str, object], raw_acp)
-    return _parse_runtime_config_section(
-        acp_payload,
-        field_path="acp",
-        model_type=_RuntimeAcpValidationModel,
+    return cast(
+        RuntimeAcpConfig | None,
+        _parse_runtime_config_section(
+            acp_payload,
+            field_path="acp",
+            model_type=_RuntimeAcpValidationModel,
+        ),
     )
 
 
@@ -755,10 +985,13 @@ def _parse_mcp_config(raw_mcp: object) -> RuntimeMcpConfig | None:
         raise ValueError("runtime config field 'mcp' must be an object when provided")
 
     mcp_payload = cast(dict[str, object], raw_mcp)
-    return _parse_runtime_config_section(
-        mcp_payload,
-        field_path="mcp",
-        model_type=_RuntimeMcpValidationModel,
+    return cast(
+        RuntimeMcpConfig | None,
+        _parse_runtime_config_section(
+            mcp_payload,
+            field_path="mcp",
+            model_type=_RuntimeMcpValidationModel,
+        ),
     )
 
 
@@ -769,10 +1002,13 @@ def _parse_tui_config(raw_tui: object) -> RuntimeTuiConfig | None:
         raise ValueError("runtime config field 'tui' must be an object when provided")
 
     tui_payload = cast(dict[str, object], raw_tui)
-    return _parse_runtime_config_section(
-        tui_payload,
-        field_path="tui",
-        model_type=_RuntimeTuiValidationModel,
+    return cast(
+        RuntimeTuiConfig | None,
+        _parse_runtime_config_section(
+            tui_payload,
+            field_path="tui",
+            model_type=_RuntimeTuiValidationModel,
+        ),
     )
 
 
@@ -832,22 +1068,165 @@ def serialize_runtime_plan_config(plan: RuntimePlanConfig | None) -> dict[str, o
     return payload
 
 
-def _parse_runtime_config_section[TConfig, TModel: BaseModel](
+def _parse_runtime_config_section[TModel: BaseModel](
     raw_value: object,
     *,
     field_path: str,
     model_type: type[TModel],
-) -> TConfig | None:
+) -> object | None:
     if raw_value is None:
         return None
     if not isinstance(raw_value, dict):
         raise ValueError(f"runtime config field '{field_path}' must be an object when provided")
 
     validated_model = _validate_runtime_config_model(model_type, cast(dict[str, object], raw_value))
-    return cast(
-        TConfig,
-        cast(_RuntimeConfigOutput, validated_model).to_runtime_config(),
+    return cast(_RuntimeConfigOutput, validated_model).to_runtime_config()
+
+
+def _resolve_tui_config(
+    global_tui: RuntimeTuiConfig | None, workspace_tui: RuntimeTuiConfig | None
+) -> RuntimeTuiConfig:
+    leader_key = (
+        (workspace_tui.leader_key if workspace_tui is not None else None)
+        or (global_tui.leader_key if global_tui is not None else None)
+        or "alt+x"
     )
+    keymap = (
+        workspace_tui.keymap
+        if workspace_tui is not None and workspace_tui.keymap is not None
+        else (global_tui.keymap if global_tui is not None else None)
+    )
+    preferences = _merge_tui_preferences(
+        global_tui.preferences if global_tui is not None else None,
+        workspace_tui.preferences if workspace_tui is not None else None,
+    )
+    return RuntimeTuiConfig(leader_key=leader_key, keymap=keymap, preferences=preferences)
+
+
+def _merge_tui_preferences(
+    global_preferences: RuntimeTuiPreferences | None,
+    workspace_preferences: RuntimeTuiPreferences | None,
+) -> RuntimeTuiPreferences:
+    global_theme = global_preferences.theme if global_preferences is not None else None
+    workspace_theme = workspace_preferences.theme if workspace_preferences is not None else None
+    global_reading = global_preferences.reading if global_preferences is not None else None
+    workspace_reading = workspace_preferences.reading if workspace_preferences is not None else None
+    return RuntimeTuiPreferences(
+        theme=RuntimeTuiThemePreferences(
+            name=(workspace_theme.name if workspace_theme is not None else None)
+            or (global_theme.name if global_theme is not None else None)
+            or _BUILTIN_TUI_THEME_DEFAULTS["auto"],
+            mode=(workspace_theme.mode if workspace_theme is not None else None)
+            or (global_theme.mode if global_theme is not None else None)
+            or "auto",
+        ),
+        reading=RuntimeTuiReadingPreferences(
+            wrap=(
+                workspace_reading.wrap
+                if workspace_reading is not None and workspace_reading.wrap is not None
+                else (
+                    global_reading.wrap
+                    if global_reading is not None and global_reading.wrap is not None
+                    else True
+                )
+            ),
+            sidebar_collapsed=(
+                workspace_reading.sidebar_collapsed
+                if workspace_reading is not None and workspace_reading.sidebar_collapsed is not None
+                else (
+                    global_reading.sidebar_collapsed
+                    if global_reading is not None and global_reading.sidebar_collapsed is not None
+                    else False
+                )
+            ),
+        ),
+    )
+
+
+def merge_runtime_tui_preferences(
+    base_preferences: RuntimeTuiPreferences | None,
+    override_preferences: RuntimeTuiPreferences | None,
+) -> RuntimeTuiPreferences:
+    return _merge_tui_preferences(base_preferences, override_preferences)
+
+
+def effective_runtime_tui_preferences(
+    preferences: RuntimeTuiPreferences | None,
+) -> EffectiveRuntimeTuiPreferences:
+    merged_preferences = _merge_tui_preferences(None, preferences)
+    assert merged_preferences.theme is not None
+    assert merged_preferences.reading is not None
+    resolved_theme = _resolve_theme_preferences(merged_preferences.theme)
+    return EffectiveRuntimeTuiPreferences(theme=resolved_theme, reading=merged_preferences.reading)
+
+
+def _resolve_theme_preferences(
+    theme_preferences: RuntimeTuiThemePreferences,
+) -> RuntimeTuiThemePreferences:
+    mode = theme_preferences.mode or "auto"
+    name = theme_preferences.name or _BUILTIN_TUI_THEME_DEFAULTS[mode]
+    if mode == "light" and name not in _BUILTIN_TEXTUAL_LIGHT_THEMES:
+        name = _BUILTIN_TUI_THEME_DEFAULTS[mode]
+    elif mode == "dark" and name not in _BUILTIN_TEXTUAL_DARK_THEMES:
+        name = _BUILTIN_TUI_THEME_DEFAULTS[mode]
+    elif mode == "auto" and name not in (
+        _BUILTIN_TEXTUAL_LIGHT_THEMES | _BUILTIN_TEXTUAL_DARK_THEMES
+    ):
+        name = _BUILTIN_TUI_THEME_DEFAULTS[mode]
+    return RuntimeTuiThemePreferences(name=name, mode=mode)
+
+
+def save_workspace_tui_preferences(workspace: Path, preferences: RuntimeTuiPreferences) -> None:
+    _save_tui_preferences(runtime_config_path(workspace.resolve()), preferences)
+
+
+def save_global_tui_preferences(preferences: RuntimeTuiPreferences) -> None:
+    _save_tui_preferences(user_runtime_config_path(), preferences)
+
+
+def _save_tui_preferences(config_path: Path, preferences: RuntimeTuiPreferences) -> None:
+    payload = _read_json_object(config_path)
+    tui_payload = cast(
+        dict[str, object], payload.get("tui") if isinstance(payload.get("tui"), dict) else {}
+    )
+    updated_tui_payload = dict(tui_payload)
+    updated_tui_payload["preferences"] = serialize_runtime_tui_preferences(preferences)
+    payload["tui"] = updated_tui_payload
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+
+
+def _read_json_object(config_path: Path) -> dict[str, object]:
+    if not config_path.exists():
+        return {}
+    try:
+        raw_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"runtime config file must contain valid JSON: {config_path}") from exc
+    if not isinstance(raw_payload, dict):
+        raise ValueError(f"runtime config file must contain a JSON object: {config_path}")
+    return cast(dict[str, object], raw_payload)
+
+
+def serialize_runtime_tui_preferences(preferences: RuntimeTuiPreferences) -> dict[str, object]:
+    payload: dict[str, object] = {}
+    if preferences.theme is not None:
+        theme_payload: dict[str, object] = {}
+        if preferences.theme.name is not None:
+            theme_payload["name"] = preferences.theme.name
+        if preferences.theme.mode is not None:
+            theme_payload["mode"] = preferences.theme.mode
+        if theme_payload:
+            payload["theme"] = theme_payload
+    if preferences.reading is not None:
+        reading_payload: dict[str, object] = {}
+        if preferences.reading.wrap is not None:
+            reading_payload["wrap"] = preferences.reading.wrap
+        if preferences.reading.sidebar_collapsed is not None:
+            reading_payload["sidebar_collapsed"] = preferences.reading.sidebar_collapsed
+        if reading_payload:
+            payload["reading"] = reading_payload
+    return payload
 
 
 def _parse_provider_fallback_config(
