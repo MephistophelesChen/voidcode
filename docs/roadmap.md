@@ -104,18 +104,44 @@ VoidCode 仍处于 pre-MVP 开发阶段。路线图从基础工作贯穿至 MVP 
 
 在最近几轮 runtime 配置、provider fallback、恢复语义、checkpoint groundwork 与 archive / replay 主线收口之后，当前 backlog 的优先级应以 GitHub issue 列表为准，而不再继续沿用 `#83` / `#84` 作为“当前下一步”的描述。
 
+### 当前产品化原则（有限时间内）
+
+接下来的工作不应再以能力面扩张为优先，而应以**尽快做出一个真正可用的 agent coding 工具**为目标。对当前仓库而言，这意味着：
+
+- 优先提升**真实任务成功率**，而不是继续增加更多表面能力；
+- 优先完善 **CLI + Web** 这条已经真实接入 runtime 的主路径，TUI 继续保持降权状态；
+- 优先解决“为什么这台机器不能用”“为什么改完代码后不稳定”“为什么默认项目还需要大量手动配置”这类首轮体验问题；
+- provider / multi-agent / ACP / MCP 等能力扩张，只有在不挤占主路径产品化时间的前提下才继续推进。
+
+因此，后续 backlog 的判断标准应从“还能再做什么能力”转为“是否直接提高第一次真实改码任务的完成率”。
+
 ### 1. 先处理当前仍然打开的 runtime / client parity / tooling issue
 
-- `#100`：strengthen TUI session, replay, and approval parity with CLI
 - `#120`：make edit flows formatter-aware and re-read aligned
 - `#122`：add a runtime capability doctor for external tool readiness
+
+这两项是当前产品化最直接的主线：
+
+- `#122` 负责回答“当前环境为什么不能工作、缺什么、该怎么修”；
+- `#120` 负责回答“代码改完以后如何保持格式化、读取结果和实际文件状态一致”。
+
+如果这两条链路没有完成，用户即使看到了更多 provider、更多客户端表面或更多可选能力，也很难稳定完成第一次真实任务。
 
 ### 2. 再继续能力层的完善与加固
 
 - `#111`：improve built-in LSP presets and defaults
 - `#110`：improve built-in formatter presets and defaults
-- `#126`：add fuzz test for tools
 - `#130`：add more llm api
+
+这一层工作的目标不是继续堆 capability，而是提高**默认可用性**：让 Python、TypeScript 与常见本地环境在更少手动配置下直接进入可用状态。
+
+`#130` 这类 provider 扩展工作应放在默认可用性之后，避免在核心任务链路尚未稳定时继续扩大维护面。
+
+### 3. 当前不作为产品化第一优先级的工作
+
+- `#100`：TUI parity 仍然有价值，但当前不应与 CLI + Web 主路径并行争抢产品化时间；
+- `#126`：fuzz test 继续有价值，但应服务于主路径稳定化，而不是替代产品化主线本身；
+- `#97`：ACP contract extraction 仍应保持 boundary-first，不应抢占当前 MVP 主路径时间。
 
 这些 issue 都应继续遵守当前边界：
 
