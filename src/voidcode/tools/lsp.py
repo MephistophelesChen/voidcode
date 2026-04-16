@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import enum
+import errno
+import subprocess
 from pathlib import Path
 from typing import Any, ClassVar, Protocol, cast
 
 from lsprotocol import converters as lsp_converters
 from lsprotocol import types as lsp_types
 
+from ..hook.config import RuntimeFormatterPresetConfig, RuntimeHooksConfig
 from .contracts import ToolCall, ToolDefinition, ToolResult
 
 
@@ -176,5 +179,171 @@ class LspTool:
             data={"lsp_response": response.response},
         )
 
-    def __repr__(self) -> str:  # pragma: no cover
+    def __repr__(self) -> str:
         return "<LspTool runtime-managed>"
+
+
+# ------------------------------------------------------------------------------
+# FormatTool 内嵌在这里
+# ------------------------------------------------------------------------------
+FORMAT_DEFINITION = ToolDefinition(
+    name="format_file",
+    description=(
+        "Auto-format a file using built-in formatter presets with default file mappings, "
+        "project-root detection, and fallback commands."
+    ),
+    input_schema={
+        "type": "object",
+        "properties": {"path": {"type": "string", "description": "Path to the file to format"}},
+        "required": ["path"],
+    },
+    read_only=False,
+)
+
+
+class FormatTool:
+    def __init__(self, hooks_config: RuntimeHooksConfig, workspace: Path) -> None:
+        self._hooks = hooks_config
+        self._workspace = workspace.resolve()
+
+    @property
+    def definition(self) -> ToolDefinition:
+        return FORMAT_DEFINITION
+
+    def invoke(self, call: ToolCall, *, workspace: Path) -> ToolResult:
+        file_path = self._resolve_target_path(call)
+        resolved = self._hooks.resolve_formatter(file_path)
+
+        if not resolved:
+            return ToolResult(
+                tool_name=FORMAT_DEFINITION.name,
+                status="error",
+                error=f"No formatter available for {file_path}",
+                data={"path": str(file_path)},
+            )
+
+        lang, preset = resolved
+        cwd = self._resolve_formatter_cwd(file_path=file_path, preset=preset)
+        attempted_commands = [
+            list(preset.command),
+            *[list(cmd) for cmd in preset.fallback_commands],
+        ]
+        missing_tools: list[str] = []
+        failed_attempts: list[tuple[list[str], subprocess.CompletedProcess[str]]] = []
+
+        for command_parts in attempted_commands:
+            cmd = [*command_parts, str(file_path)]
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    cwd=cwd,
+                    capture_output=True,
+                    text=True,
+                )
+            except OSError as exc:
+                if exc.errno == errno.ENOENT:
+                    missing_tools.append(command_parts[0])
+                    continue
+
+                failed_attempts.append(
+                    (
+                        cmd,
+                        subprocess.CompletedProcess(
+                            args=cmd,
+                            returncode=1,
+                            stdout="",
+                            stderr=str(exc),
+                        ),
+                    )
+                )
+                continue
+
+            if proc.returncode == 0:
+                return ToolResult(
+                    tool_name=FORMAT_DEFINITION.name,
+                    status="ok",
+                    content=f"Successfully formatted {file_path.name} ({lang})",
+                    data={
+                        "path": str(file_path),
+                        "language": lang,
+                        "command": cmd,
+                        "cwd": str(cwd),
+                    },
+                )
+
+            failed_attempts.append((cmd, proc))
+
+        if failed_attempts:
+            last_cmd, last_proc = failed_attempts[-1]
+            stderr = (last_proc.stderr or last_proc.stdout)[:300].strip()
+            return ToolResult(
+                tool_name=FORMAT_DEFINITION.name,
+                status="error",
+                error=(
+                    f"Format failed for {file_path.name} using preset '{lang}' from {cwd}: "
+                    f"{stderr or 'formatter exited with a non-zero status'}"
+                ),
+                data={
+                    "path": str(file_path),
+                    "language": lang,
+                    "cwd": str(cwd),
+                    "command": last_cmd,
+                    "attempted_commands": [cmd + [str(file_path)] for cmd in attempted_commands],
+                    "stdout": last_proc.stdout,
+                    "stderr": last_proc.stderr,
+                },
+            )
+
+        attempted_tool_names = ", ".join(dict.fromkeys(missing_tools))
+        return ToolResult(
+            tool_name=FORMAT_DEFINITION.name,
+            status="error",
+            error=(
+                f"No formatter executable was available for preset '{lang}'. "
+                f"Tried: {attempted_tool_names}. Install one of them or override "
+                f"hooks.formatter_presets.{lang}.command in .voidcode.json."
+            ),
+            data={
+                "path": str(file_path),
+                "language": lang,
+                "cwd": str(cwd),
+                "attempted_commands": [cmd + [str(file_path)] for cmd in attempted_commands],
+            },
+        )
+
+    def _resolve_target_path(self, call: ToolCall) -> Path:
+        raw_path = call.arguments.get("path")
+        if not isinstance(raw_path, str):
+            raise ValueError("format_file requires a string 'path' argument")
+
+        file_path = (self._workspace / raw_path).resolve()
+        if not file_path.is_relative_to(self._workspace):
+            raise ValueError("format_file target must stay inside the current workspace")
+        if not file_path.is_file():
+            raise ValueError(f"format_file target does not exist: {raw_path}")
+        return file_path
+
+    def _resolve_formatter_cwd(
+        self, *, file_path: Path, preset: RuntimeFormatterPresetConfig
+    ) -> Path:
+        if preset.cwd_policy == "workspace":
+            return self._workspace
+        if preset.cwd_policy == "file_directory":
+            return file_path.parent
+
+        return self._find_nearest_root(file_path=file_path, preset=preset) or self._workspace
+
+    def _find_nearest_root(
+        self, *, file_path: Path, preset: RuntimeFormatterPresetConfig
+    ) -> Path | None:
+        if not preset.root_markers:
+            return None
+
+        current = file_path.parent
+        while current.is_relative_to(self._workspace):
+            if any((current / marker).exists() for marker in preset.root_markers):
+                return current
+            if current == self._workspace:
+                break
+            current = current.parent
+        return None

@@ -49,8 +49,19 @@ class ToolProvider(Protocol):
 
 
 class BuiltinToolProvider:
-    def __init__(self, *, lsp_tool: Tool | None = None, mcp_tools: tuple[Tool, ...] = ()) -> None:
+    _lsp_tool: Tool | None
+    _format_tool: Tool | None
+    _mcp_tools: tuple[Tool, ...]
+
+    def __init__(
+        self,
+        *,
+        lsp_tool: Tool | None = None,
+        format_tool: Tool | None = None,
+        mcp_tools: tuple[Tool, ...] = (),
+    ) -> None:
         self._lsp_tool = lsp_tool
+        self._format_tool = format_tool
         self._mcp_tools = mcp_tools
 
     def provide_tools(self) -> tuple[Tool, ...]:
@@ -68,6 +79,8 @@ class BuiltinToolProvider:
 
         if self._lsp_tool is not None:
             tools.append(self._lsp_tool)
+        if self._format_tool is not None:
+            tools.append(self._format_tool)
 
         tools.extend(self._mcp_tools)
 
