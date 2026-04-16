@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from .config import RuntimeFormatterPresetConfig, RuntimeHooksConfig
+from .config import RuntimeFormatterPresetConfig, RuntimeHooksConfig, RuntimeHookSurface
 from .executor import HookExecutionEvent, HookExecutionOutcome, HookExecutionRequest, run_tool_hooks
 
 __all__ = [
@@ -8,6 +8,7 @@ __all__ = [
     "HookExecutionOutcome",
     "HookExecutionRequest",
     "RuntimeFormatterPresetConfig",
+    "RuntimeHookSurface",
     "RuntimeHooksConfig",
     "run_tool_hooks",
 ]

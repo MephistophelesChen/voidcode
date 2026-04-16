@@ -31,7 +31,16 @@ type ExistingEventType = Literal[
     "runtime.approval_resolved",
     "runtime.failed",
 ]
-type PrototypeAdditiveEventType = Literal["runtime.memory_refreshed",]
+type PrototypeAdditiveEventType = Literal[
+    "runtime.memory_refreshed",
+    "runtime.session_started",
+    "runtime.session_ended",
+    "runtime.session_idle",
+    "runtime.background_task_completed",
+    "runtime.background_task_failed",
+    "runtime.background_task_cancelled",
+    "runtime.delegated_result_available",
+]
 type KnownEventType = ExistingEventType | PrototypeAdditiveEventType
 
 RUNTIME_REQUEST_RECEIVED: Final[ExistingEventType] = "runtime.request_received"
@@ -60,6 +69,19 @@ RUNTIME_APPROVAL_RESOLVED: Final[ExistingEventType] = "runtime.approval_resolved
 RUNTIME_FAILED: Final[ExistingEventType] = "runtime.failed"
 
 RUNTIME_MEMORY_REFRESHED: Final[PrototypeAdditiveEventType] = "runtime.memory_refreshed"
+RUNTIME_SESSION_STARTED: Final[PrototypeAdditiveEventType] = "runtime.session_started"
+RUNTIME_SESSION_ENDED: Final[PrototypeAdditiveEventType] = "runtime.session_ended"
+RUNTIME_SESSION_IDLE: Final[PrototypeAdditiveEventType] = "runtime.session_idle"
+RUNTIME_BACKGROUND_TASK_COMPLETED: Final[PrototypeAdditiveEventType] = (
+    "runtime.background_task_completed"
+)
+RUNTIME_BACKGROUND_TASK_FAILED: Final[PrototypeAdditiveEventType] = "runtime.background_task_failed"
+RUNTIME_BACKGROUND_TASK_CANCELLED: Final[PrototypeAdditiveEventType] = (
+    "runtime.background_task_cancelled"
+)
+RUNTIME_DELEGATED_RESULT_AVAILABLE: Final[PrototypeAdditiveEventType] = (
+    "runtime.delegated_result_available"
+)
 
 EMITTED_EVENT_TYPES: Final[tuple[ExistingEventType, ...]] = (
     RUNTIME_REQUEST_RECEIVED,
@@ -89,6 +111,13 @@ EMITTED_EVENT_TYPES: Final[tuple[ExistingEventType, ...]] = (
 )
 PROTOTYPE_ADDITIVE_EVENT_TYPES: Final[tuple[PrototypeAdditiveEventType, ...]] = (
     RUNTIME_MEMORY_REFRESHED,
+    RUNTIME_SESSION_STARTED,
+    RUNTIME_SESSION_ENDED,
+    RUNTIME_SESSION_IDLE,
+    RUNTIME_BACKGROUND_TASK_COMPLETED,
+    RUNTIME_BACKGROUND_TASK_FAILED,
+    RUNTIME_BACKGROUND_TASK_CANCELLED,
+    RUNTIME_DELEGATED_RESULT_AVAILABLE,
 )
 KNOWN_EVENT_TYPES: Final[tuple[KnownEventType, ...]] = (
     *EMITTED_EVENT_TYPES,

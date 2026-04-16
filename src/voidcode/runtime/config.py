@@ -448,6 +448,34 @@ def _parse_hooks_config(raw_hooks: object) -> RuntimeHooksConfig | None:
 
     pre_tool = _parse_command_list(hooks_payload.get("pre_tool"), field_path="hooks.pre_tool")
     post_tool = _parse_command_list(hooks_payload.get("post_tool"), field_path="hooks.post_tool")
+    on_session_start = _parse_command_list(
+        hooks_payload.get("on_session_start"),
+        field_path="hooks.on_session_start",
+    )
+    on_session_end = _parse_command_list(
+        hooks_payload.get("on_session_end"),
+        field_path="hooks.on_session_end",
+    )
+    on_session_idle = _parse_command_list(
+        hooks_payload.get("on_session_idle"),
+        field_path="hooks.on_session_idle",
+    )
+    on_background_task_completed = _parse_command_list(
+        hooks_payload.get("on_background_task_completed"),
+        field_path="hooks.on_background_task_completed",
+    )
+    on_background_task_failed = _parse_command_list(
+        hooks_payload.get("on_background_task_failed"),
+        field_path="hooks.on_background_task_failed",
+    )
+    on_background_task_cancelled = _parse_command_list(
+        hooks_payload.get("on_background_task_cancelled"),
+        field_path="hooks.on_background_task_cancelled",
+    )
+    on_delegated_result_available = _parse_command_list(
+        hooks_payload.get("on_delegated_result_available"),
+        field_path="hooks.on_delegated_result_available",
+    )
     formatter_presets: dict[str, RuntimeFormatterPresetConfig] = _parse_formatter_presets_config(
         hooks_payload.get("formatter_presets"),
         field_path="hooks.formatter_presets",
@@ -457,6 +485,13 @@ def _parse_hooks_config(raw_hooks: object) -> RuntimeHooksConfig | None:
         enabled=enabled,
         pre_tool=pre_tool,
         post_tool=post_tool,
+        on_session_start=on_session_start,
+        on_session_end=on_session_end,
+        on_session_idle=on_session_idle,
+        on_background_task_completed=on_background_task_completed,
+        on_background_task_failed=on_background_task_failed,
+        on_background_task_cancelled=on_background_task_cancelled,
+        on_delegated_result_available=on_delegated_result_available,
         formatter_presets=formatter_presets,
     )
 

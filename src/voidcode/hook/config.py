@@ -5,6 +5,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
+type RuntimeHookSurface = Literal[
+    "pre_tool",
+    "post_tool",
+    "session_start",
+    "session_end",
+    "session_idle",
+    "background_task_completed",
+    "background_task_failed",
+    "background_task_cancelled",
+    "delegated_result_available",
+]
+
 type FormatterCwdPolicy = Literal["workspace", "nearest_root", "file_directory"]
 
 _PRETTIER_ROOT_MARKERS = (
@@ -153,9 +165,29 @@ class RuntimeHooksConfig:
     enabled: bool | None = None
     pre_tool: tuple[tuple[str, ...], ...] = ()
     post_tool: tuple[tuple[str, ...], ...] = ()
+    on_session_start: tuple[tuple[str, ...], ...] = ()
+    on_session_end: tuple[tuple[str, ...], ...] = ()
+    on_session_idle: tuple[tuple[str, ...], ...] = ()
+    on_background_task_completed: tuple[tuple[str, ...], ...] = ()
+    on_background_task_failed: tuple[tuple[str, ...], ...] = ()
+    on_background_task_cancelled: tuple[tuple[str, ...], ...] = ()
+    on_delegated_result_available: tuple[tuple[str, ...], ...] = ()
     formatter_presets: Mapping[str, RuntimeFormatterPresetConfig] = field(
         default_factory=_empty_formatter_presets
     )
+
+    def commands_for_surface(self, surface: RuntimeHookSurface) -> tuple[tuple[str, ...], ...]:
+        return {
+            "pre_tool": self.pre_tool,
+            "post_tool": self.post_tool,
+            "session_start": self.on_session_start,
+            "session_end": self.on_session_end,
+            "session_idle": self.on_session_idle,
+            "background_task_completed": self.on_background_task_completed,
+            "background_task_failed": self.on_background_task_failed,
+            "background_task_cancelled": self.on_background_task_cancelled,
+            "delegated_result_available": self.on_delegated_result_available,
+        }[surface]
 
     def resolve_formatter(self, file_path: Path) -> tuple[str, RuntimeFormatterPresetConfig] | None:
         for lang, preset in self.formatter_presets.items():
