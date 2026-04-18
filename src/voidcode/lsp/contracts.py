@@ -40,4 +40,9 @@ class ResolvedLspServerConfig:
     def matches_path(self, path: Path) -> bool:
         if not self.extensions:
             return False
-        return path.suffix.lower() in self.extensions
+        normalized_name = path.name.lower()
+        normalized_suffix = path.suffix.lower()
+        return any(
+            normalized_suffix == extension or normalized_name == extension.removeprefix(".")
+            for extension in self.extensions
+        )

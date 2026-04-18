@@ -113,6 +113,21 @@ def test_lsp_config_state_matches_server_by_file_extension() -> None:
     assert state.default_server_name(Path("main.go")) == "gopls"
 
 
+def test_lsp_config_state_matches_dockerls_for_canonical_dockerfile_name() -> None:
+    state = LspConfigState.from_runtime_config(
+        RuntimeLspConfig(
+            enabled=True,
+            servers={
+                "yamlls": RuntimeLspServerConfig(command=("yaml-language-server", "--stdio")),
+                "dockerls": RuntimeLspServerConfig(),
+            },
+        )
+    )
+
+    assert state.matching_servers(Path("Dockerfile")) == ("dockerls",)
+    assert state.default_server_name(Path("Dockerfile")) == "dockerls"
+
+
 def test_disabled_lsp_manager_rejects_requests() -> None:
     manager = DisabledLspManager()
 

@@ -103,6 +103,23 @@ def test_resolve_lsp_server_configs_matches_servers_by_extension() -> None:
     assert match_lsp_servers_for_path(servers, Path("main.go")) == ("gopls",)
 
 
+def test_resolve_lsp_server_config_matches_canonical_dockerfile_name() -> None:
+    config = resolve_lsp_server_config("dockerls", LspServerConfigOverride())
+
+    assert config.matches_path(Path("Dockerfile")) is True
+
+
+def test_resolve_lsp_server_configs_prefers_dockerls_for_canonical_dockerfile_name() -> None:
+    servers = resolve_lsp_server_configs(
+        {
+            "yamlls": LspServerConfigOverride(),
+            "dockerls": LspServerConfigOverride(),
+        }
+    )
+
+    assert match_lsp_servers_for_path(servers, Path("Dockerfile")) == ("dockerls",)
+
+
 def test_resolve_lsp_server_config_rejects_unknown_preset() -> None:
     with pytest.raises(ValueError, match="unknown LSP preset"):
         _ = resolve_lsp_server_config(
