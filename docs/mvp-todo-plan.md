@@ -246,6 +246,6 @@ VoidCode 已经拥有扎实的 pre-MVP 基础：
 - [x] 完成 issue #84：为 cold-session archive / replay strategy 落地后续实现入口
 - [x] 完成 issue #122：为外部工具与运行环境提供 capability doctor，降低首次使用门槛
 - [x] 完成 issue #120：让 edit 流程具备 formatter-aware 和 re-read aligned 行为
-- [ ] 继续完成 issue #111：把默认 LSP 配置推进到主流项目开箱可用
+- [x] 完成 issue #111：把默认 LSP 配置推进到主流项目开箱可用
 - [ ] 用 CLI + Web 主路径固化一条标准 demo flow，并把失败诊断/恢复路径写成可重复操作手册
 - [ ] 在 runtime 主线稳定之后，再重新评估 TUI 特定 epic 和剩余客户端 polish 工作

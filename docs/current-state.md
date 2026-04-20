@@ -25,7 +25,7 @@
 - [x] **扩展基础设施基础**：运行时现在包括工具、技能、LSP 和 ACP 的类型化配置和发现基础设施，并为 hooks/config MVP 提供了清晰的配置边界。
 - [x] **内置工具提供商**：专门的 `BuiltinToolProvider` 负责通过运行时边界注册 `grep`、`read_file`、`shell_exec` 和 `write_file`。
 - [x] **技能发现基础设施**：对 `.voidcode/skills/<name>/SKILL.md` 文件存在极简发现机制；运行时在每次运行时发出 `runtime.skills_loaded` 事件。
-- [x] **LSP 和 ACP/MCP 扩展基础设施**：LSP 已具备运行时管理的基础能力（配置、manager、事件与只读 tool 基线）。MCP 已具备 runtime-managed lifecycle、tool discovery 和 tool call 基础集成，但当前仍是 config-gated / opt-in 能力，默认不会进入 MVP 主执行路径；现阶段重点仍是边界稳定化而非功能扩张。ACP 仍主要停留在类型化配置与适配器存根阶段。
+- [x] **LSP 和 ACP/MCP 扩展基础设施**：LSP 已具备运行时管理的基础能力（配置、manager、事件、只读 tool 基线，以及主流 workspace 的 implicit defaults）。MCP 已具备 runtime-managed lifecycle、tool discovery 和 tool call 基础集成，但当前仍是 config-gated / opt-in 能力，默认不会进入 MVP 主执行路径；现阶段重点仍是边界稳定化而非功能扩张。ACP 已进入最小的 runtime-managed transport / lifecycle 路径，但仍保持严格收敛的 MVP 范围。
 - [x] **极简 HTTP 传输**：精简的后端 HTTP 层现在暴露了 `GET /api/sessions`、`GET /api/sessions/{session_id}` 和 `POST /api/runtime/run/stream`，其中 SSE 数据块直接从运行时边界序列化，并且现在可以通过 `voidcode serve` 在本地提供服务。
 - [x] **运行时配置分层**：运行时现在显式支持 `execution_engine`、`provider_fallback` 与 `max_steps`，并将恢复关键配置持久化到 `SessionState.metadata["runtime_config"]`，以保证 `config show`、resume 和 provider fallback 语义一致。
 
@@ -40,8 +40,8 @@
 - [x] **Provider-backed execution engine 路径**：运行时已经具备 provider fallback、context window 管理、approval resume 连续性与可配置 step budget 的运行时治理基础。
 - [ ] **预定义 agent / multi-agent 边界**：`src/voidcode/agent/` 目录已经存在，并作为预定义 agent 的声明边界承载 prompt / hook / skill / MCP / tool / provider 配置；当前仓库尚未实现的仍然是 multi-agent 执行语义本身。
 - [ ] **技能执行**：skill discovery 与 `runtime.skills_loaded` 事件已经完成，但运行时仍未执行技能逻辑，也尚未提供特定于技能的工具上下文。
-- [ ] **ACP 真实集成**：LSP 的只读 runtime-managed 基线与独立 preset/config 模块已经存在，且 `src/voidcode/lsp/`、`src/voidcode/acp/` 等能力层边界目录已补齐文档；当前未完成的主要缺口转为 ACP 的真实传输与生命周期集成。
-- [ ] **下一批 runtime / tooling 主线 issue**：`#70`、`#82`、`#83`、`#84`、`#100`、`#110`、`#120` 与 `#122` 已经完成，因此“当前下一步”已进一步收敛为 `#111`（LSP presets/defaults）、`#136`（workspace-scoped LSP lifecycle）、`#139`（background result retrieval / leader notification）、`#140`（parent-child session model）与 `#97`（ACP contract extraction）。
+- [ ] **ACP 能力面仍未完成**：`acp` 已具备最小 memory transport、connect/handshake、run / approval-resume integration 与 lifecycle event 基线，但当前仍未进入更宽的 agent control-plane 或跨运行时协作语义。
+- [ ] **当前剩余的 runtime / tooling 主线 issue**：GitHub 当前仍打开的主线 issue 主要收敛为 `#152`（parse and apply agent presets in runtime）与 `#153`（execute discovered skills in runtime）；LSP defaults 已基本进入主流项目开箱可用状态，后续 backlog 应继续以 issue 列表为准，而不是沿用更早一批已完成的编号。
 - [~] **TUI 客户端**：已具备提示词输入和审批处理的初始实现，但会话管理、恢复/重放与规范冒烟验证仍未收口，当前优先级也已下调。
 - [x] **Web 客户端集成**：已接入真实的会话列表、会话重放、流式运行和审批处理路径，并具备真实 store/client 闭环验证。
 
