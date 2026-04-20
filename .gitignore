@@ -25,3 +25,5 @@ htmlcov/
 .sisyphus/
 .test_venv/
 agent/
+.omx/
+.codex
