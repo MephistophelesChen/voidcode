@@ -51,7 +51,7 @@ VoidCode 仍处于 pre-MVP 开发阶段。路线图从基础工作贯穿至 MVP 
 
 将工具和扩展作为运行时的一等公民，包含元数据、注册、内置功能和统一的执行管线。此 Epic 还包括作为运行时管理接口的技能、语言服务器（LSP）和智能体通信协议（ACP）的基础设施。
 
-**当前状态：** 部分完成。内置工具和技能发现已实现。LSP 已具备 read-only runtime-managed 基线（manager、tool、事件与测试），并且仓库已经补齐了 `lsp/`、`skills/`、`provider/`、`acp/`、`mcp/` 等能力层边界目录文档；独立的 LSP server preset/config 模块也已经落地。MCP 已具备 runtime-managed lifecycle、tool discovery、tool call 集成 groundwork，但当前仍是 config-gated / opt-in 能力（#107 目标：稳定化当前边界，而非新增功能）。ACP 仍主要停留在受限的配置/适配器基础与 disabled-stub 阶段。
+**当前状态：** 部分完成。内置工具和技能发现已实现。LSP 已具备 read-only runtime-managed 基线（manager、tool、事件与测试），并且仓库已经补齐了 `lsp/`、`skills/`、`provider/`、`acp/`、`mcp/` 等能力层边界目录文档；独立的 LSP server preset/config 模块也已经落地，主流 workspace 的 implicit defaults 也已进入可用状态。MCP 已具备 runtime-managed lifecycle、tool discovery、tool call 集成 groundwork，但当前仍是 config-gated / opt-in 能力（#107 目标：稳定化当前边界，而非新增功能）。ACP 已进入最小的 runtime-managed transport / lifecycle 路径，但仍未扩展为更宽的协作控制面。
 
 **技术细节：** `ProviderSingleAgentGraph` 代表当前已实现的 provider-backed execution path，直接调用 `SingleAgentProvider.propose_turn()`，不依赖 LangGraph；当前默认 execution engine 仍是 deterministic，因此仅 `DeterministicReadOnlyGraph` 使用 LangGraph `StateGraph` 这一事实不应被表述为“LangGraph 已退出主路径”。
 
@@ -117,24 +117,23 @@ VoidCode 仍处于 pre-MVP 开发阶段。路线图从基础工作贯穿至 MVP 
 
 ### 1. 先处理当前仍然打开的 runtime / client parity / tooling issue
 
-- `#111`：improve built-in LSP presets and defaults
-- `#136`：make LSP lifecycle workspace-scoped and prevent duplicate startup
+- `#152`：parse and apply agent presets in runtime
+- `#153`：execute discovered skills in runtime
 
-当前最直接的主线已经从 `#120` / `#122` 转向 LSP 默认可用性与 lifecycle 稳定性：
+当前最直接的剩余主线，已经从前一轮的 LSP defaults / lifecycle 稳定性，转向 runtime 对 agent preset 与 skill execution 的真实接入：
 
-- `#111` 负责回答“默认项目能否少配置直接进入可用状态”；
-- `#136` 负责回答“同一 workspace 内的 LSP 生命周期是否稳定且不会重复启动”。
+- `#152` 负责回答“声明式 agent preset 是否真正进入 runtime 主路径”；
+- `#153` 负责回答“skill discovery 是否只是事件和发现，还是已经变成真实可执行能力”。
 
-如果这两条链路没有完成，用户即使已经拥有 formatter-aware edit 和 capability doctor，也仍然会在主流项目的默认体验上遇到阻塞。
+如果这两条链路没有完成，仓库虽然已经具备稳定的 CLI + Web 主路径与更好的默认可用性，但 `agent/` 与 `skills/` 仍然停留在边界/发现层，而没有成为真正的运行时能力。
 
 ### 2. 再继续能力层的完善与加固
 
-- `#111`：improve built-in LSP presets and defaults
 - `#130`：add more llm api
 
-这一层工作的目标不是继续堆 capability，而是提高**默认可用性**：让 Python、TypeScript 与常见本地环境在更少手动配置下直接进入可用状态。
+这一层工作的目标不应再是补前一轮已经完成的 LSP 默认配置，而是继续提高**真实任务完成率**和 provider-backed 主路径的可用性。
 
-`#130` 这类 provider 扩展工作应放在默认可用性之后，避免在核心任务链路尚未稳定时继续扩大维护面。
+`#130` 这类 provider 扩展工作仍应放在主路径稳定化之后，避免在核心任务链路尚未完全收口时继续扩大维护面。
 
 ### 3. 当前不作为产品化第一优先级的工作
 
