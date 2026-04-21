@@ -1168,7 +1168,7 @@ def test_transport_streams_runtime_chunks_in_sse_order() -> None:
         def run_stream(self, request: RuntimeRequestLike) -> Iterator[StreamChunkLike]:
             assert request.prompt == "transport me"
             assert request.session_id == "stream-session"
-            assert request.metadata == {"client": "transport-test"}
+            assert request.metadata == {"provider_stream": True}
             yield runtime_stream_chunk(
                 kind="event",
                 session=session,
@@ -1215,7 +1215,7 @@ def test_transport_streams_runtime_chunks_in_sse_order() -> None:
             {
                 "prompt": "transport me",
                 "session_id": "stream-session",
-                "metadata": {"client": "transport-test"},
+                "metadata": {"provider_stream": True},
             }
         ).encode("utf-8"),
     )
@@ -1681,6 +1681,26 @@ def test_transport_rejects_invalid_run_stream_payload() -> None:
 
     assert response.status == 400
     assert response.json() == {"error": "prompt must be a non-empty string"}
+
+
+def test_transport_rejects_unsupported_request_metadata_field() -> None:
+    create_runtime_app = _load_transport_app_factory()
+    app = create_runtime_app(workspace=Path("/tmp/workspace"))
+
+    response = _run_app(
+        app,
+        method="POST",
+        path="/api/runtime/run/stream",
+        body=json.dumps(
+            {
+                "prompt": "transport me",
+                "metadata": {"client": "transport-test"},
+            }
+        ).encode("utf-8"),
+    )
+
+    assert response.status == 400
+    assert response.json() == {"error": "unsupported request metadata field(s): client"}
 
 
 def test_transport_rejects_unknown_parent_session_in_run_stream_payload(tmp_path: Path) -> None:

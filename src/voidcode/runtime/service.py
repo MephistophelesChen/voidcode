@@ -74,13 +74,16 @@ from .context_window import (
     prepare_single_agent_context,
 )
 from .contracts import (
+    InternalRuntimeRequestMetadata,
     RuntimeNotification,
     RuntimeRequest,
     RuntimeRequestError,
+    RuntimeRequestMetadataPayload,
     RuntimeResponse,
     RuntimeSessionResult,
     RuntimeStreamChunk,
     UnknownSessionError,
+    validate_runtime_request_metadata,
     validate_session_id,
     validate_session_reference_id,
 )
@@ -587,12 +590,7 @@ class VoidCodeRuntime:
             resolved = self._config_with_request_agent_override(resolved, request_agent)
         request_max_steps = request.metadata.get("max_steps")
         if request_max_steps is not None:
-            if not isinstance(request_max_steps, int) or isinstance(request_max_steps, bool):
-                raise ValueError(
-                    "request metadata 'max_steps' must be an integer greater than or equal to 1"
-                )
-            if request_max_steps < 1:
-                raise ValueError("request metadata 'max_steps' must be at least 1")
+            assert isinstance(request_max_steps, int)
             return EffectiveRuntimeConfig(
                 approval_mode=resolved.approval_mode,
                 model=resolved.model,
@@ -756,8 +754,16 @@ class VoidCodeRuntime:
             acp_events=self._acp_adapter.fail(message),
         )
 
-    def _run_with_persistence(self, request: RuntimeRequest) -> Iterator[RuntimeStreamChunk]:
-        request = self._validated_request(request)
+    def _run_with_persistence(
+        self,
+        request: RuntimeRequest,
+        *,
+        allow_internal_metadata: bool = False,
+    ) -> Iterator[RuntimeStreamChunk]:
+        request = self._validated_request(
+            request,
+            allow_internal_metadata=allow_internal_metadata,
+        )
         session_id = self._resolve_session_id(request)
         self._register_active_session_id(session_id)
         try:
@@ -823,7 +829,9 @@ class VoidCodeRuntime:
             prompt=request.prompt,
             session_id=request.session_id,
             parent_session_id=request.parent_session_id,
-            metadata={**request.metadata, "provider_stream": True},
+            metadata=validate_runtime_request_metadata(
+                {**request.metadata, "provider_stream": True}
+            ),
             allocate_session_id=request.allocate_session_id,
         )
         return self._run_with_persistence(request_with_stream)
@@ -2519,7 +2527,12 @@ class VoidCodeRuntime:
             status = "completed"
         return VoidCodeRuntime._session_with_status(response_session, status)
 
-    def _validated_request(self, request: RuntimeRequest) -> RuntimeRequest:
+    def _validated_request(
+        self,
+        request: RuntimeRequest,
+        *,
+        allow_internal_metadata: bool = False,
+    ) -> RuntimeRequest:
         session_id = request.session_id
         if session_id is not None:
             session_id = validate_session_id(session_id)
@@ -2563,7 +2576,10 @@ class VoidCodeRuntime:
             prompt=request.prompt,
             session_id=session_id,
             parent_session_id=resolved_parent_session_id,
-            metadata=request.metadata,
+            metadata=validate_runtime_request_metadata(
+                dict(request.metadata),
+                allow_internal_fields=allow_internal_metadata,
+            ),
             allocate_session_id=request.allocate_session_id,
         )
 
@@ -2698,7 +2714,7 @@ class VoidCodeRuntime:
         return build_runtime_contexts(self._skill_registry, skill_names=selected_skill_names)
 
     @staticmethod
-    def _fresh_request_metadata(metadata: dict[str, object]) -> dict[str, object]:
+    def _fresh_request_metadata(metadata: RuntimeRequestMetadataPayload) -> dict[str, object]:
         sanitized = dict(metadata)
         sanitized.pop("applied_skills", None)
         sanitized.pop("applied_skill_payloads", None)
@@ -3217,7 +3233,7 @@ class VoidCodeRuntime:
                 prompt=task.request.prompt,
                 session_id=task.request.session_id,
                 parent_session_id=task.request.parent_session_id,
-                metadata=task.request.metadata,
+                metadata=cast(RuntimeRequestMetadataPayload, task.request.metadata),
                 allocate_session_id=task.request.allocate_session_id,
             )
             session_id = self._resolve_session_id(request)
@@ -3240,18 +3256,40 @@ class VoidCodeRuntime:
                 )
                 self._run_background_task_lifecycle_hook(terminal_task)
                 return
-            response = self.run(
-                RuntimeRequest(
-                    prompt=dispatch_task.request.prompt,
-                    session_id=session_id,
-                    parent_session_id=dispatch_task.request.parent_session_id,
-                    metadata={
+            events: list[EventEnvelope] = []
+            output: str | None = None
+            final_session: SessionState | None = None
+            internal_request = RuntimeRequest(
+                prompt=dispatch_task.request.prompt,
+                session_id=session_id,
+                parent_session_id=dispatch_task.request.parent_session_id,
+                metadata=cast(
+                    InternalRuntimeRequestMetadata,
+                    {
                         **dispatch_task.request.metadata,
                         "background_task_id": task_id,
                         "background_run": True,
                     },
-                    allocate_session_id=False,
-                )
+                ),
+                allocate_session_id=False,
+            )
+            for chunk in self._run_with_persistence(
+                internal_request,
+                allow_internal_metadata=True,
+            ):
+                final_session = chunk.session
+                if chunk.event is not None:
+                    events.append(chunk.event)
+                if chunk.kind == "output":
+                    output = chunk.output
+            if final_session is None:
+                raise ValueError("runtime stream emitted no chunks")
+            if final_session.status == "waiting":
+                final_session = self._reload_persisted_session(session_id=final_session.session.id)
+            response = RuntimeResponse(
+                session=final_session,
+                events=tuple(events),
+                output=output,
             )
             self._finalize_background_task_from_session_response(session_response=response)
         except Exception as exc:

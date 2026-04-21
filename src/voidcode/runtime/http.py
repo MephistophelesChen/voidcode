@@ -17,6 +17,7 @@ from .contracts import (
     RuntimeResponse,
     RuntimeSessionResult,
     RuntimeStreamChunk,
+    validate_runtime_request_metadata,
     validate_session_id,
     validate_session_reference_id,
 )
@@ -441,12 +442,13 @@ class RuntimeTransportApp:
         metadata = payload.get("metadata", {})
         if not isinstance(metadata, dict):
             raise ValueError("metadata must be an object when provided")
+        normalized_metadata = validate_runtime_request_metadata(cast(dict[str, object], metadata))
 
         return RuntimeRequest(
             prompt=prompt,
             session_id=session_id,
             parent_session_id=parent_session_id,
-            metadata=cast(dict[str, object], metadata),
+            metadata=normalized_metadata,
             allocate_session_id=session_id is None,
         )
 

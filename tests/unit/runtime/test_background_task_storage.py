@@ -52,6 +52,37 @@ def test_background_task_storage_create_load_and_list(tmp_path: Path) -> None:
     assert listed[0].prompt == "read sample.txt"
 
 
+def test_background_task_storage_preserves_stable_request_metadata_round_trip(
+    tmp_path: Path,
+) -> None:
+    store = SqliteSessionStore()
+    task = BackgroundTaskState(
+        task=BackgroundTaskRef(id="task-metadata-roundtrip"),
+        request=BackgroundTaskRequestSnapshot(
+            prompt="read sample.txt",
+            metadata={
+                "abort_requested": False,
+                "agent": {"preset": "leader", "model": "opencode/gpt-5.4"},
+                "max_steps": 2,
+                "provider_stream": True,
+                "skills": ["alpha", "beta"],
+            },
+        ),
+    )
+
+    store.create_background_task(workspace=tmp_path, task=task)
+
+    loaded = store.load_background_task(workspace=tmp_path, task_id="task-metadata-roundtrip")
+
+    assert loaded.request.metadata == {
+        "abort_requested": False,
+        "agent": {"preset": "leader", "model": "opencode/gpt-5.4"},
+        "max_steps": 2,
+        "provider_stream": True,
+        "skills": ["alpha", "beta"],
+    }
+
+
 def test_background_task_storage_create_assigns_store_timestamps_and_orders_by_latest_update(
     tmp_path: Path,
 ) -> None:
