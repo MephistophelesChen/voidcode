@@ -15,6 +15,7 @@ from unittest.mock import Mock
 import pytest
 
 import voidcode.runtime.service as runtime_service_module
+from voidcode.acp import AcpRequestEnvelope, AcpResponseEnvelope
 from voidcode.agent import LEADER_AGENT_MANIFEST, get_builtin_agent_manifest
 from voidcode.graph.read_only_slice import DeterministicReadOnlyGraph
 from voidcode.provider.auth import ProviderAuthAuthorizeRequest
@@ -24,7 +25,7 @@ from voidcode.provider.config import (
     LiteLLMProviderConfig,
 )
 from voidcode.provider.registry import ModelProviderRegistry
-from voidcode.runtime.acp import DisabledAcpAdapter
+from voidcode.runtime.acp import AcpAdapterState, AcpRuntimeEvent, DisabledAcpAdapter
 from voidcode.runtime.config import (
     RuntimeAcpConfig,
     RuntimeAgentConfig,
@@ -46,6 +47,7 @@ from voidcode.runtime.events import (
     RUNTIME_BACKGROUND_TASK_COMPLETED,
     RUNTIME_BACKGROUND_TASK_FAILED,
     RUNTIME_BACKGROUND_TASK_WAITING_APPROVAL,
+    RUNTIME_MCP_SERVER_FAILED,
     RUNTIME_MCP_SERVER_STARTED,
     RUNTIME_MCP_SERVER_STOPPED,
     RUNTIME_MEMORY_REFRESHED,
@@ -180,6 +182,20 @@ class _UnknownToolGraph:
     ) -> _StubStep:
         _ = request, tool_results, session
         return _StubStep(tool_call=ToolCall(tool_name="missing_tool", arguments={}))
+
+
+class _McpToolGraph:
+    def step(
+        self,
+        request: GraphRunRequest,
+        tool_results: tuple[object, ...],
+        *,
+        session: SessionState,
+    ) -> _StubStep:
+        _ = request, session
+        if not tool_results:
+            return _StubStep(tool_call=ToolCall(tool_name="mcp/echo/echo", arguments={}))
+        return _StubStep(output="done", is_finished=True)
 
 
 class _TwoApprovalThenDoneGraph:
@@ -1829,6 +1845,343 @@ def test_runtime_surfaces_mcp_lifecycle_events_in_run_responses(tmp_path: Path) 
     response = runtime.run(RuntimeRequest(prompt="hello"))
 
     assert any(event.event_type == RUNTIME_MCP_SERVER_STARTED for event in response.events)
+
+
+def test_runtime_emits_mcp_failed_before_terminal_failure_on_startup_refresh(
+    tmp_path: Path,
+) -> None:
+    class _FailingMcpManager:
+        def __init__(self) -> None:
+            self._drained = False
+
+        startup_error = "MCP[echo]: failed to start server - command not found: missing-mcp"
+
+        @property
+        def configuration(self) -> McpConfigState:
+            return McpConfigState(configured_enabled=True)
+
+        def current_state(self) -> McpManagerState:
+            return McpManagerState(mode="managed", configuration=self.configuration)
+
+        def list_tools(self, *, workspace: Path):
+            _ = workspace
+            raise ValueError(self.startup_error)
+
+        def call_tool(
+            self, *, server_name: str, tool_name: str, arguments: dict[str, object], workspace: Path
+        ):
+            _ = server_name, tool_name, arguments, workspace
+            raise AssertionError("not used")
+
+        def shutdown(self) -> tuple[McpRuntimeEvent, ...]:
+            return ()
+
+        def drain_events(self) -> tuple[McpRuntimeEvent, ...]:
+            if self._drained:
+                return ()
+            self._drained = True
+            return (
+                McpRuntimeEvent(
+                    event_type=RUNTIME_MCP_SERVER_FAILED,
+                    payload={
+                        "server": "echo",
+                        "workspace_root": str(tmp_path),
+                        "state": "failed",
+                        "stage": "startup",
+                        "error": self.startup_error,
+                    },
+                ),
+            )
+
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_StubGraph(),
+        mcp_manager=_FailingMcpManager(),
+    )
+
+    response = runtime.run(RuntimeRequest(prompt="hello"))
+
+    assert response.session.status == "failed"
+    assert [event.event_type for event in response.events] == [
+        "runtime.request_received",
+        RUNTIME_MCP_SERVER_FAILED,
+        "runtime.failed",
+    ]
+    assert response.events[-1].payload == {
+        "error": _FailingMcpManager.startup_error,
+        "kind": "mcp_startup_failed",
+    }
+
+
+def test_runtime_resume_emits_mcp_failed_before_terminal_failure_on_startup_refresh(
+    tmp_path: Path,
+) -> None:
+    initial_runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_ApprovalThenCaptureSkillGraph(),
+        config=RuntimeConfig(approval_mode="ask"),
+        permission_policy=PermissionPolicy(mode="ask"),
+    )
+    waiting = initial_runtime.run(RuntimeRequest(prompt="go", session_id="mcp-resume-startup-fail"))
+    approval_request_id = str(waiting.events[-1].payload["request_id"])
+
+    class _FailingMcpManager:
+        def __init__(self) -> None:
+            self._drained = False
+
+        startup_error = "MCP[echo]: failed to start server - command not found: missing-mcp"
+
+        @property
+        def configuration(self) -> McpConfigState:
+            return McpConfigState(configured_enabled=True)
+
+        def current_state(self) -> McpManagerState:
+            return McpManagerState(mode="managed", configuration=self.configuration)
+
+        def list_tools(self, *, workspace: Path):
+            _ = workspace
+            raise ValueError(self.startup_error)
+
+        def call_tool(
+            self, *, server_name: str, tool_name: str, arguments: dict[str, object], workspace: Path
+        ):
+            _ = server_name, tool_name, arguments, workspace
+            raise AssertionError("not used")
+
+        def shutdown(self) -> tuple[McpRuntimeEvent, ...]:
+            return ()
+
+        def drain_events(self) -> tuple[McpRuntimeEvent, ...]:
+            if self._drained:
+                return ()
+            self._drained = True
+            return (
+                McpRuntimeEvent(
+                    event_type=RUNTIME_MCP_SERVER_FAILED,
+                    payload={
+                        "server": "echo",
+                        "workspace_root": str(tmp_path),
+                        "state": "failed",
+                        "stage": "startup",
+                        "error": self.startup_error,
+                    },
+                ),
+            )
+
+    resumed_runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_ApprovalThenCaptureSkillGraph(),
+        config=RuntimeConfig(approval_mode="ask"),
+        permission_policy=PermissionPolicy(mode="ask"),
+        mcp_manager=_FailingMcpManager(),
+    )
+
+    resumed = resumed_runtime.resume(
+        session_id="mcp-resume-startup-fail",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    resumed_suffix = [
+        event for event in resumed.events if event.sequence > waiting.events[-1].sequence
+    ]
+    assert resumed.session.status == "failed"
+    assert [event.sequence for event in resumed_suffix] == list(
+        range(waiting.events[-1].sequence + 1, resumed.events[-1].sequence + 1)
+    )
+    assert [event.event_type for event in resumed_suffix] == [
+        RUNTIME_MCP_SERVER_FAILED,
+        "runtime.failed",
+    ]
+    assert resumed.events[-1].payload == {
+        "error": _FailingMcpManager.startup_error,
+        "kind": "mcp_startup_failed",
+    }
+
+
+def test_runtime_resume_skips_acp_startup_when_mcp_refresh_already_failed(
+    tmp_path: Path,
+) -> None:
+    initial_runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_ApprovalThenCaptureSkillGraph(),
+        config=RuntimeConfig(acp=RuntimeAcpConfig(enabled=True), approval_mode="ask"),
+        permission_policy=PermissionPolicy(mode="ask"),
+    )
+    waiting = initial_runtime.run(
+        RuntimeRequest(prompt="go", session_id="mcp-resume-skips-acp-after-mcp-fail")
+    )
+    approval_request_id = str(waiting.events[-1].payload["request_id"])
+
+    class _FailingMcpManager:
+        def __init__(self) -> None:
+            self._drained = False
+
+        startup_error = "MCP[echo]: failed to start server - command not found: missing-mcp"
+
+        @property
+        def configuration(self) -> McpConfigState:
+            return McpConfigState(configured_enabled=True)
+
+        def current_state(self) -> McpManagerState:
+            return McpManagerState(mode="managed", configuration=self.configuration)
+
+        def list_tools(self, *, workspace: Path):
+            _ = workspace
+            raise ValueError(self.startup_error)
+
+        def call_tool(
+            self, *, server_name: str, tool_name: str, arguments: dict[str, object], workspace: Path
+        ):
+            _ = server_name, tool_name, arguments, workspace
+            raise AssertionError("not used")
+
+        def shutdown(self) -> tuple[McpRuntimeEvent, ...]:
+            return ()
+
+        def drain_events(self) -> tuple[McpRuntimeEvent, ...]:
+            if self._drained:
+                return ()
+            self._drained = True
+            return (
+                McpRuntimeEvent(
+                    event_type=RUNTIME_MCP_SERVER_FAILED,
+                    payload={
+                        "server": "echo",
+                        "workspace_root": str(tmp_path),
+                        "state": "failed",
+                        "stage": "startup",
+                        "error": self.startup_error,
+                    },
+                ),
+            )
+
+    class _TrackingAcpAdapter:
+        def __init__(self) -> None:
+            self.connect_calls = 0
+            self._state = DisabledAcpAdapter(RuntimeAcpConfig(enabled=True)).current_state()
+
+        @property
+        def configuration(self):
+            return self._state.configuration
+
+        def current_state(self) -> AcpAdapterState:
+            return self._state
+
+        def connect(self) -> tuple[AcpRuntimeEvent, ...]:
+            self.connect_calls += 1
+            raise AssertionError("ACP connect should not run after MCP refresh failure")
+
+        def disconnect(self) -> tuple[AcpRuntimeEvent, ...]:
+            return ()
+
+        def request(self, envelope: AcpRequestEnvelope) -> AcpResponseEnvelope:
+            _ = envelope
+            raise AssertionError("not used")
+
+        def fail(self, message: str) -> tuple[AcpRuntimeEvent, ...]:
+            _ = message
+            raise AssertionError("not used")
+
+        def drain_events(self) -> tuple[AcpRuntimeEvent, ...]:
+            return ()
+
+    acp_adapter = _TrackingAcpAdapter()
+    resumed_runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_ApprovalThenCaptureSkillGraph(),
+        config=RuntimeConfig(acp=RuntimeAcpConfig(enabled=True), approval_mode="ask"),
+        permission_policy=PermissionPolicy(mode="ask"),
+        mcp_manager=_FailingMcpManager(),
+        acp_adapter=acp_adapter,
+    )
+
+    resumed = resumed_runtime.resume(
+        session_id="mcp-resume-skips-acp-after-mcp-fail",
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert acp_adapter.connect_calls == 0
+    resumed_suffix = [
+        event.event_type for event in resumed.events if event.sequence > waiting.events[-1].sequence
+    ]
+    assert resumed.session.status == "failed"
+    assert resumed_suffix == [RUNTIME_MCP_SERVER_FAILED, "runtime.failed"]
+
+
+def test_runtime_persists_mcp_failed_before_terminal_failure_on_tool_call_abort(
+    tmp_path: Path,
+) -> None:
+    class _FailingMcpManager:
+        def __init__(self) -> None:
+            self._drained = False
+
+        call_error = "MCP call transport failed"
+
+        @property
+        def configuration(self) -> McpConfigState:
+            return McpConfigState(configured_enabled=True)
+
+        def current_state(self) -> McpManagerState:
+            return McpManagerState(mode="managed", configuration=self.configuration)
+
+        def list_tools(self, *, workspace: Path):
+            _ = workspace
+            return (
+                McpToolDescriptor(
+                    server_name="echo",
+                    tool_name="echo",
+                    description="Echo input",
+                    input_schema={"type": "object"},
+                ),
+            )
+
+        def call_tool(
+            self, *, server_name: str, tool_name: str, arguments: dict[str, object], workspace: Path
+        ) -> McpToolCallResult:
+            _ = server_name, tool_name, arguments, workspace
+            raise ValueError(self.call_error)
+
+        def shutdown(self) -> tuple[McpRuntimeEvent, ...]:
+            return ()
+
+        def drain_events(self) -> tuple[McpRuntimeEvent, ...]:
+            if self._drained:
+                return ()
+            self._drained = True
+            return (
+                McpRuntimeEvent(
+                    event_type=RUNTIME_MCP_SERVER_FAILED,
+                    payload={
+                        "server": "echo",
+                        "workspace_root": str(tmp_path),
+                        "state": "failed",
+                        "stage": "call",
+                        "error": self.call_error,
+                        "method": "tools/call",
+                    },
+                ),
+            )
+
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=_McpToolGraph(),
+        mcp_manager=_FailingMcpManager(),
+        permission_policy=PermissionPolicy(mode="allow"),
+    )
+
+    with pytest.raises(ValueError, match=_FailingMcpManager.call_error):
+        _ = list(runtime.run_stream(RuntimeRequest(prompt="go", session_id="mcp-call-failed")))
+
+    replay = runtime.resume("mcp-call-failed")
+
+    assert replay.session.status == "failed"
+    assert [event.event_type for event in replay.events[-2:]] == [
+        RUNTIME_MCP_SERVER_FAILED,
+        "runtime.failed",
+    ]
+    assert replay.events[-1].payload == {"error": _FailingMcpManager.call_error}
 
 
 def test_runtime_metadata_includes_mcp_state_when_configured(tmp_path: Path) -> None:

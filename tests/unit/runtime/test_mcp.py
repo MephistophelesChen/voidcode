@@ -405,6 +405,15 @@ while True:
     else:
         raise AssertionError("expected MCP manager to time out waiting for a silent server")
 
+    failure_events = manager.drain_events()
+    assert [event.event_type for event in failure_events] == [
+        "runtime.mcp_server_started",
+        "runtime.mcp_server_failed",
+        "runtime.mcp_server_stopped",
+    ]
+    assert failure_events[1].payload["stage"] == "startup"
+    assert failure_events[1].payload["method"] == "initialize"
+
 
 def test_mcp_manager_restarts_server_after_timeout(tmp_path: Path) -> None:
     server_script = tmp_path / "retryable_mcp_server.py"
@@ -493,6 +502,40 @@ for raw_line in sys.stdin:
     else:
         raise AssertionError("expected first MCP attempt to time out")
 
+    failure_events = manager.drain_events()
+    assert [event.event_type for event in failure_events] == [
+        "runtime.mcp_server_started",
+        "runtime.mcp_server_failed",
+        "runtime.mcp_server_stopped",
+    ]
+
     discovered = manager.list_tools(workspace=tmp_path)
 
     assert [tool.tool_name for tool in discovered] == ["echo"]
+
+
+def test_mcp_manager_emits_failure_event_when_startup_command_is_missing(tmp_path: Path) -> None:
+    manager = build_mcp_manager(
+        RuntimeMcpConfig(
+            enabled=True,
+            servers={
+                "missing": RuntimeMcpServerConfig(
+                    transport="stdio",
+                    command=("voidcode-mcp-missing-binary",),
+                )
+            },
+        )
+    )
+
+    try:
+        manager.list_tools(workspace=tmp_path)
+    except ValueError as exc:
+        assert "command not found" in str(exc)
+    else:
+        raise AssertionError("expected MCP startup to fail for missing command")
+
+    failure_events = manager.drain_events()
+    assert [event.event_type for event in failure_events] == ["runtime.mcp_server_failed"]
+    assert failure_events[0].payload["server"] == "missing"
+    assert failure_events[0].payload["stage"] == "startup"
+    assert failure_events[0].payload["command"] == ["voidcode-mcp-missing-binary"]
