@@ -9,7 +9,12 @@ import pytest
 
 from voidcode.provider import model_catalog
 from voidcode.provider.config import LiteLLMProviderConfig
-from voidcode.provider.model_catalog import DiscoveryRequest, discover_available_models
+from voidcode.provider.model_catalog import (
+    DiscoveryRequest,
+    ProviderModelMetadata,
+    discover_available_models,
+    infer_model_metadata,
+)
 
 
 def test_discover_available_models_combines_alias_discovery_and_targets() -> None:
@@ -58,6 +63,50 @@ def test_discover_available_models_for_openai_uses_endpoint_fetcher() -> None:
     assert captured[0].headers == {"Authorization": "Bearer sk-test"}
     assert captured[0].timeout_seconds == 10.0
     assert models.discovery_mode == "configured_endpoint"
+
+
+def test_discover_available_models_includes_known_model_budget_metadata() -> None:
+    result = discover_available_models(
+        "openai",
+        LiteLLMProviderConfig(discovery_base_url="https://api.openai.com"),
+        fetcher=lambda _request: ("gpt-4o", "unknown-model"),
+    )
+
+    assert result.model_metadata["gpt-4o"] == ProviderModelMetadata(
+        context_window=128_000,
+        max_output_tokens=16_384,
+    )
+    assert "unknown-model" not in result.model_metadata
+
+
+@pytest.mark.parametrize(
+    ("provider", "model", "context_window", "max_output_tokens"),
+    [
+        ("openai", "gpt-5.5", 1_000_000, 128_000),
+        ("anthropic", "claude-opus-4-7", 1_000_000, 64_000),
+        ("google", "gemini-3-pro-preview", 1_048_576, 65_536),
+        ("deepseek", "deepseek-v4-pro", 1_000_000, 384_000),
+        ("qwen", "qwen3.6-plus", 1_000_000, 64_000),
+        ("glm", "glm-5.1", 198_000, 128_000),
+        ("kimi", "kimi-k2.6", 256_000, 96_000),
+        ("minimax", "MiniMax-M2.5", 192_000, 32_000),
+        ("grok", "grok-4-1-fast-reasoning", 2_000_000, 30_000),
+    ],
+)
+def test_infer_model_metadata_covers_current_frontier_provider_models(
+    provider: str,
+    model: str,
+    context_window: int,
+    max_output_tokens: int,
+) -> None:
+    assert infer_model_metadata(provider, model) == ProviderModelMetadata(
+        context_window=context_window,
+        max_output_tokens=max_output_tokens,
+    )
+
+
+def test_infer_model_metadata_returns_none_for_unknown_models() -> None:
+    assert infer_model_metadata("custom", "local-demo") is None
 
 
 def test_discover_available_models_for_anthropic_uses_provider_specific_headers() -> None:

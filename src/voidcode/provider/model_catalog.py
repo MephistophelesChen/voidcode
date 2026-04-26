@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 from urllib.error import URLError
 from urllib.parse import quote
@@ -12,6 +12,20 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .config import LiteLLMProviderConfig
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderModelMetadata:
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+
+    def payload(self) -> dict[str, int]:
+        payload: dict[str, int] = {}
+        if self.context_window is not None:
+            payload["context_window"] = self.context_window
+        if self.max_output_tokens is not None:
+            payload["max_output_tokens"] = self.max_output_tokens
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +45,7 @@ class ProviderModelCatalog:
     provider: str
     models: tuple[str, ...]
     refreshed: bool
+    model_metadata: dict[str, ProviderModelMetadata] = field(default_factory=dict)
     source: str = "remote"
     last_refresh_status: str = "ok"
     last_error: str | None = None
@@ -45,6 +60,7 @@ class ProviderModelCatalog:
 @dataclass(frozen=True, slots=True)
 class ModelDiscoveryResult:
     models: tuple[str, ...]
+    model_metadata: dict[str, ProviderModelMetadata]
     source: str
     last_refresh_status: str
     last_error: str | None
@@ -130,13 +146,99 @@ def discover_available_models(
     if source == "remote" and not discovered and deduped:
         source = "mixed"
 
+    model_metadata = {
+        model: metadata
+        for model in deduped
+        if (metadata := infer_model_metadata(provider_name, model)) is not None
+    }
+
     return ModelDiscoveryResult(
         models=tuple(deduped),
+        model_metadata=model_metadata,
         source=source,
         last_refresh_status=refresh_status,
         last_error=error_message,
         discovery_mode=discovery_plan.discovery_mode,
     )
+
+
+def infer_model_metadata(provider_name: str, model_name: str) -> ProviderModelMetadata | None:
+    provider = provider_name.strip().lower()
+    model = model_name.strip().lower()
+    if not model:
+        return None
+    if provider == "openai" or model.startswith(("gpt-5", "gpt-4.1", "gpt-4o", "o1", "o3", "o4")):
+        if model.startswith(("gpt-5.5", "gpt-5.4")) and not model.startswith(
+            ("gpt-5.4-mini", "gpt-5.4-nano")
+        ):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=128_000)
+        if model.startswith(("gpt-5.4-mini", "gpt-5.4-nano")):
+            return ProviderModelMetadata(context_window=400_000, max_output_tokens=128_000)
+        if model.startswith("gpt-5"):
+            return ProviderModelMetadata(context_window=400_000, max_output_tokens=128_000)
+        if model.startswith("gpt-4o-mini"):
+            return ProviderModelMetadata(context_window=128_000, max_output_tokens=16_384)
+        if model.startswith("gpt-4o"):
+            return ProviderModelMetadata(context_window=128_000, max_output_tokens=16_384)
+        if model.startswith("gpt-4.1"):
+            return ProviderModelMetadata(context_window=1_047_576, max_output_tokens=32_768)
+        if model.startswith(("o1", "o3", "o4")):
+            return ProviderModelMetadata(context_window=200_000, max_output_tokens=100_000)
+    if provider == "anthropic" or model.startswith("claude-"):
+        if model.startswith(("claude-opus-4-7", "claude-sonnet-4-6")):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=64_000)
+        if model.startswith("claude-haiku-4-5"):
+            return ProviderModelMetadata(context_window=200_000, max_output_tokens=64_000)
+        return ProviderModelMetadata(context_window=200_000, max_output_tokens=8_192)
+    if provider == "google" or model.startswith("gemini-"):
+        if model.startswith(("gemini-3-pro-preview", "gemini-3-flash-preview")):
+            return ProviderModelMetadata(context_window=1_048_576, max_output_tokens=65_536)
+        if model.startswith("gemini-3"):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=65_536)
+        if model.startswith("gemini-2.5"):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=65_536)
+        return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=8_192)
+    if provider == "deepseek" or model.startswith("deepseek-"):
+        if model.startswith("deepseek-v4"):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=384_000)
+        if model in {"deepseek-chat", "deepseek-reasoner"}:
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=384_000)
+    if provider in {"qwen", "opencode-go"} or model.startswith(("qwen", "qwq", "qvq")):
+        if model.startswith(("qwen3.6-plus", "qwen3.6-flash", "qwen3.5-plus", "qwen3.5-flash")):
+            return ProviderModelMetadata(context_window=1_000_000, max_output_tokens=64_000)
+        if model.startswith("qwen3.6-max-preview"):
+            return ProviderModelMetadata(context_window=256_000, max_output_tokens=64_000)
+        if model.startswith("qwen3.5-"):
+            return ProviderModelMetadata(context_window=256_000, max_output_tokens=64_000)
+        if model in {"qwen-plus-us", "qwen-flash-us"}:
+            return ProviderModelMetadata(context_window=1_000_000)
+    if provider in {"glm", "opencode-go"} or model.startswith("glm-"):
+        if model.startswith("glm-5.1"):
+            return ProviderModelMetadata(context_window=198_000, max_output_tokens=128_000)
+        if model.startswith("glm-5"):
+            return ProviderModelMetadata(context_window=200_000)
+    if provider in {"kimi", "opencode-go"} or model.startswith(("kimi-", "moonshot-")):
+        if model.startswith(("kimi-k2.6", "kimi-k2.5", "kimi-k2-0905")):
+            return ProviderModelMetadata(context_window=256_000, max_output_tokens=96_000)
+        if model.startswith(("kimi-k2-thinking", "kimi-k2-turbo")):
+            return ProviderModelMetadata(context_window=256_000)
+        if model.startswith("kimi-k2-0711"):
+            return ProviderModelMetadata(context_window=128_000)
+        if model.startswith("moonshot-v1-128k"):
+            return ProviderModelMetadata(context_window=128_000)
+        if model.startswith("moonshot-v1-32k"):
+            return ProviderModelMetadata(context_window=32_000)
+        if model.startswith("moonshot-v1-8k"):
+            return ProviderModelMetadata(context_window=8_000)
+    if provider in {"minimax", "opencode-go"} or model.startswith(("minimax-", "mimo-")):
+        if model.startswith("minimax-m2.5"):
+            return ProviderModelMetadata(context_window=192_000, max_output_tokens=32_000)
+        if model.startswith("minimax-m2"):
+            return ProviderModelMetadata(context_window=204_800)
+    if provider == "grok" or model.startswith("grok-"):
+        if model.startswith(("grok-4-1-fast", "grok-4-fast")):
+            return ProviderModelMetadata(context_window=2_000_000, max_output_tokens=30_000)
+    return None
 
 
 def _timeout_for_discovery(config: LiteLLMProviderConfig | None) -> float:

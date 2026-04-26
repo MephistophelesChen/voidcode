@@ -4,6 +4,8 @@ from typing import Literal
 
 from voidcode.runtime.context_window import (
     ContextWindowPolicy,
+    RuntimeContinuityState,
+    continuity_summary_metadata,
     normalize_read_file_output,
     prepare_provider_context,
 )
@@ -59,6 +61,9 @@ def test_prepare_provider_context_compacts_old_results_and_reports_metadata() ->
     assert "Compacted 2 earlier tool results:" in context.continuity_state.summary_text
     assert 'content_preview="content-1"' in context.continuity_state.summary_text
     assert 'content_preview="content-2"' in context.continuity_state.summary_text
+    assert context.summary_anchor is not None
+    assert context.summary_anchor.startswith("continuity:")
+    assert context.summary_source == {"tool_result_start": 0, "tool_result_end": 2}
     assert context.metadata_payload()["continuity_state"] == {
         "summary_text": context.continuity_state.summary_text,
         "dropped_tool_result_count": 2,
@@ -66,6 +71,8 @@ def test_prepare_provider_context_compacts_old_results_and_reports_metadata() ->
         "source": "tool_result_window",
         "version": 1,
     }
+    assert context.metadata_payload()["summary_anchor"] == context.summary_anchor
+    assert context.metadata_payload()["summary_source"] == context.summary_source
 
 
 def test_prepare_provider_context_uses_explicit_continuity_preview_policy() -> None:
@@ -86,6 +93,28 @@ def test_prepare_provider_context_uses_explicit_continuity_preview_policy() -> N
         '1. read_file ok content_preview="conte..."\n'
         "... and 2 more"
     )
+
+
+def test_continuity_summary_metadata_is_derived_from_state() -> None:
+    first = RuntimeContinuityState(
+        summary_text="one",
+        dropped_tool_result_count=1,
+        retained_tool_result_count=3,
+    )
+    second = RuntimeContinuityState(
+        summary_text="one",
+        dropped_tool_result_count=2,
+        retained_tool_result_count=3,
+    )
+
+    first_anchor, first_source = continuity_summary_metadata(first)
+    second_anchor, second_source = continuity_summary_metadata(second)
+
+    assert first_anchor is not None
+    assert second_anchor is not None
+    assert first_anchor != second_anchor
+    assert first_source == {"tool_result_start": 0, "tool_result_end": 1}
+    assert second_source == {"tool_result_start": 0, "tool_result_end": 2}
 
 
 def _continuity_tool_result(

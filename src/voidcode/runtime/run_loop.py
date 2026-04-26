@@ -19,6 +19,7 @@ from ..tools.runtime_context import RuntimeToolInvocationContext, bind_runtime_t
 from .context_window import (
     RuntimeContextWindow,
     RuntimeContinuityState,
+    continuity_summary_metadata,
     normalize_tool_result_content,
 )
 from .contracts import RuntimeStreamChunk
@@ -68,6 +69,7 @@ class RuntimeRunLoopCoordinator:
             )
             reinjected_continuity = continuity_to_reinject
             if reinjected_continuity is not None:
+                summary_anchor, summary_source = continuity_summary_metadata(reinjected_continuity)
                 context_window = RuntimeContextWindow(
                     prompt=base_context.prompt,
                     tool_results=base_context.tool_results,
@@ -77,6 +79,8 @@ class RuntimeRunLoopCoordinator:
                     retained_tool_result_count=base_context.retained_tool_result_count,
                     max_tool_result_count=base_context.max_tool_result_count,
                     continuity_state=reinjected_continuity,
+                    summary_anchor=summary_anchor,
+                    summary_source=summary_source,
                 )
             else:
                 context_window = base_context
@@ -106,6 +110,8 @@ class RuntimeRunLoopCoordinator:
                             "original_tool_result_count": context_window.original_tool_result_count,
                             "retained_tool_result_count": context_window.retained_tool_result_count,
                             "compacted": True,
+                            "summary_anchor": context_window.summary_anchor,
+                            "summary_source": context_window.summary_source,
                             "continuity_state": (
                                 context_window.continuity_state.metadata_payload()
                                 if context_window.continuity_state is not None
@@ -261,6 +267,10 @@ class RuntimeRunLoopCoordinator:
             is_final_step = (
                 getattr(graph_step, "is_finished", False)
                 or getattr(graph_step, "output", None) is not None
+            )
+            session = runtime._session_with_provider_usage_metadata(
+                session,
+                getattr(graph_step, "provider_usage", None),
             )
             current_chunk_session = session
             if is_final_step:
