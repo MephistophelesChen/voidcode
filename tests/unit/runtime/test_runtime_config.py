@@ -78,6 +78,11 @@ PRETTIER_ROOT_MARKERS = (
     "prettier.config.mjs",
 )
 
+
+def _prompt_materialization_payload(profile: str) -> dict[str, object]:
+    return {"profile": profile, "version": 1, "source": "builtin", "format": "text"}
+
+
 PRETTIER_FALLBACK_COMMANDS = (
     ("bunx", "prettier", "--write"),
     ("pnpm", "exec", "prettier", "--write"),
@@ -1060,6 +1065,7 @@ def test_runtime_agent_payload_round_trips_through_serialization() -> None:
     assert serialize_runtime_agent_config(agent) == {
         "preset": "leader",
         "prompt_profile": "leader",
+        "prompt_materialization": _prompt_materialization_payload("leader"),
         "model": "opencode/gpt-5.4",
         "execution_engine": "provider",
         "tools": {
@@ -1069,6 +1075,27 @@ def test_runtime_agent_payload_round_trips_through_serialization() -> None:
             "default": ["read_file"],
         },
         "skills": {"enabled": False, "paths": [".voidcode/skills"]},
+    }
+
+
+def test_runtime_agent_serialization_materialization_preserves_prompt_profile_override() -> None:
+    agent = parse_runtime_agent_payload(
+        {
+            "preset": "leader",
+            "prompt_ref": "researcher",
+            "prompt_source": "builtin",
+        },
+        source="test payload",
+    )
+
+    assert agent is not None
+    assert serialize_runtime_agent_config(agent) == {
+        "preset": "leader",
+        "prompt_profile": "researcher",
+        "prompt_materialization": _prompt_materialization_payload("researcher"),
+        "prompt_ref": "researcher",
+        "prompt_source": "builtin",
+        "execution_engine": "provider",
     }
 
 
@@ -1093,6 +1120,7 @@ def test_runtime_agent_payload_round_trips_explicit_empty_tool_boundaries() -> N
     assert serialize_runtime_agent_config(agent) == {
         "preset": "leader",
         "prompt_profile": "leader",
+        "prompt_materialization": _prompt_materialization_payload("leader"),
         "execution_engine": "provider",
         "tools": {"allowlist": [], "default": []},
     }
@@ -1405,6 +1433,7 @@ def test_runtime_config_agents_payload_round_trips(tmp_path: Path) -> None:
         "leader": {
             "preset": "leader",
             "prompt_profile": "leader",
+            "prompt_materialization": _prompt_materialization_payload("leader"),
             "prompt_ref": "leader",
             "prompt_source": "builtin",
             "hook_refs": ["python"],
@@ -1414,6 +1443,7 @@ def test_runtime_config_agents_payload_round_trips(tmp_path: Path) -> None:
         "researcher": {
             "preset": "researcher",
             "prompt_profile": "researcher",
+            "prompt_materialization": _prompt_materialization_payload("researcher"),
             "execution_engine": "provider",
         },
     }
