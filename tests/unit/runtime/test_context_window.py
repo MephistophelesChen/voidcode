@@ -120,7 +120,7 @@ def test_prepare_provider_context_compacts_by_absolute_token_budget() -> None:
     assert context.compacted is True
     assert context.compaction_reason == "tool_result_window"
     assert context.token_budget == 90
-    assert context.token_estimate_source == "approx_chars_per_4"
+    assert context.token_estimate_source == "unicode_aware_chars"
     assert context.original_tool_result_tokens is not None
     assert context.retained_tool_result_tokens is not None
     assert context.dropped_tool_result_tokens is not None
@@ -158,6 +158,28 @@ def test_prepare_provider_context_derives_budget_from_context_ratio() -> None:
     assert context.retained_tool_result_tokens <= 50
 
 
+def test_prepare_provider_context_enforces_count_cap_with_token_budget() -> None:
+    context = prepare_provider_context(
+        prompt="read sample.txt",
+        tool_results=(
+            _sized_tool_result(1, content_size=16),
+            _sized_tool_result(2, content_size=16),
+            _sized_tool_result(3, content_size=16),
+            _sized_tool_result(4, content_size=16),
+        ),
+        session_metadata={},
+        policy=ContextWindowPolicy(
+            max_tool_results=2,
+            max_tool_result_tokens=1_000,
+        ),
+    )
+
+    assert tuple(result.data["index"] for result in context.tool_results) == (3, 4)
+    assert context.max_tool_result_count == 2
+    assert context.retained_tool_result_count == 2
+    assert context.compacted is True
+
+
 def test_prepare_provider_context_preserves_latest_result_over_budget() -> None:
     context = prepare_provider_context(
         prompt="read sample.txt",
@@ -170,6 +192,40 @@ def test_prepare_provider_context_preserves_latest_result_over_budget() -> None:
     assert context.compacted is False
     assert context.retained_tool_result_tokens is not None
     assert context.retained_tool_result_tokens > 1
+
+
+def test_prepare_provider_context_uses_unicode_aware_token_estimates() -> None:
+    ascii_context = prepare_provider_context(
+        prompt="read ascii.txt",
+        tool_results=(
+            ToolResult(
+                tool_name="read_file",
+                content="a" * 80,
+                status="ok",
+                data={"path": "ascii.txt"},
+            ),
+        ),
+        session_metadata={},
+        policy=ContextWindowPolicy(max_tool_result_tokens=1),
+    )
+    unicode_context = prepare_provider_context(
+        prompt="read unicode.txt",
+        tool_results=(
+            ToolResult(
+                tool_name="read_file",
+                content="你" * 80,
+                status="ok",
+                data={"path": "unicode.txt"},
+            ),
+        ),
+        session_metadata={},
+        policy=ContextWindowPolicy(max_tool_result_tokens=1),
+    )
+
+    assert ascii_context.retained_tool_result_tokens is not None
+    assert unicode_context.retained_tool_result_tokens is not None
+    assert unicode_context.retained_tool_result_tokens > ascii_context.retained_tool_result_tokens
+    assert unicode_context.token_estimate_source == "unicode_aware_chars"
 
 
 def test_prepare_provider_context_keeps_count_policy_when_budget_missing() -> None:

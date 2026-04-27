@@ -141,13 +141,20 @@ def _tool_result_preview(result: ToolResult, *, max_preview_chars: int) -> str:
     return " ".join(parts)
 
 
-_TOKEN_ESTIMATE_SOURCE = "approx_chars_per_4"
+_TOKEN_ESTIMATE_SOURCE = "unicode_aware_chars"
 
 
 def _estimated_token_count(value: str) -> int:
     if not value:
         return 0
-    return max(1, (len(value) + 3) // 4)
+    ascii_chars = 0
+    non_ascii_chars = 0
+    for char in value:
+        if ord(char) < 128:
+            ascii_chars += 1
+        else:
+            non_ascii_chars += 1
+    return max(1, ((ascii_chars + 3) // 4) + non_ascii_chars)
 
 
 def _tool_result_token_estimate(result: ToolResult) -> int:
@@ -158,7 +165,13 @@ def _tool_result_token_estimate(result: ToolResult) -> int:
         "error": result.error,
         "data": result.data,
     }
-    serialized = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
+    serialized = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+        ensure_ascii=False,
+    )
     return _estimated_token_count(serialized)
 
 
@@ -315,16 +328,19 @@ def prepare_provider_context(
     original_count = len(tool_results)
     token_budget = _policy_token_budget(effective_policy)
 
+    if effective_policy.max_tool_results == 0:
+        count_limited_results: tuple[ToolResult, ...] = ()
+    else:
+        count_limited_results = tool_results[-effective_policy.max_tool_results :]
+
     if token_budget is not None:
         retained_results = _retain_results_within_token_budget(
-            tool_results,
+            count_limited_results,
             token_budget=token_budget,
             minimum_retained_results=effective_policy.minimum_retained_tool_results,
         )
-    elif effective_policy.max_tool_results == 0:
-        retained_results: tuple[ToolResult, ...] = ()
     else:
-        retained_results = tool_results[-effective_policy.max_tool_results :]
+        retained_results = count_limited_results
 
     retained_count = len(retained_results)
     compacted = retained_count < original_count
