@@ -47,11 +47,11 @@ mise run frontend:install
 # Explore the CLI
 uv run voidcode --help
 
-# Run a local read task through the runtime
-uv run voidcode run "read README.md" --workspace .
-
 # Run deterministic explicitly for test/dev/no-key harness workflows
 VOIDCODE_EXECUTION_ENGINE=deterministic uv run voidcode run "read README.md" --workspace .
+
+# Run the provider-backed product path after configuring credentials and a model
+OPENCODE_API_KEY=... VOIDCODE_MODEL=opencode-go/glm-5 uv run voidcode run "read README.md" --workspace .
 
 # Run a write task that requires approval
 uv run voidcode run "write hello.txt hello world" --workspace . --approval-mode ask
