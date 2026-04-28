@@ -4,7 +4,7 @@ import operator
 from dataclasses import dataclass, field
 from typing import Annotated, Protocol, TypedDict, runtime_checkable
 
-from ..provider.protocol import ProviderContextWindow
+from ..provider.protocol import ProviderAssembledContext, ProviderContextWindow
 from ..runtime.events import EventSource
 from ..runtime.session import SessionState
 from ..tools.contracts import ToolCall, ToolDefinition, ToolResult
@@ -40,9 +40,8 @@ class GraphRunRequest:
     session: SessionState
     prompt: str
     available_tools: tuple[ToolDefinition, ...] = ()
-    applied_skills: tuple[AppliedSkill, ...] = ()
-    skill_prompt_context: str = ""
     context_window: ProviderContextWindow | None = None
+    assembled_context: ProviderAssembledContext | None = None
     metadata: dict[str, object] = field(default_factory=dict)
 
 

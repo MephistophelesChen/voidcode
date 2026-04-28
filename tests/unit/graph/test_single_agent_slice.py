@@ -9,7 +9,12 @@ from voidcode.graph.provider_graph import ProviderGraph
 from voidcode.provider.protocol import ProviderErrorKind
 from voidcode.provider.registry import ModelProviderRegistry
 from voidcode.provider.resolution import resolve_provider_model
-from voidcode.runtime.context_window import RuntimeContextWindow, RuntimeContinuityState
+from voidcode.runtime.context_window import (
+    RuntimeAssembledContext,
+    RuntimeContextSegment,
+    RuntimeContextWindow,
+    RuntimeContinuityState,
+)
 from voidcode.runtime.provider_protocol import (
     ProviderExecutionError,
     ProviderStreamEvent,
@@ -30,6 +35,46 @@ def _tool_definitions() -> tuple[ToolDefinition, ...]:
 
 def _session() -> SessionState:
     return SessionState(session=SessionRef(id="s1"), status="running", turn=1, metadata={})
+
+
+def _assembled_from_context_window(context_window: RuntimeContextWindow) -> RuntimeAssembledContext:
+    segments: list[RuntimeContextSegment] = [
+        RuntimeContextSegment(role="user", content=context_window.prompt)
+    ]
+    for index, result in enumerate(context_window.tool_results, start=1):
+        tool_call_id = f"test_tool_{index}"
+        segments.append(
+            RuntimeContextSegment(
+                role="assistant",
+                content=None,
+                tool_call_id=tool_call_id,
+                tool_name=result.tool_name,
+                tool_arguments={},
+            )
+        )
+        segments.append(
+            RuntimeContextSegment(
+                role="tool",
+                content=result.content or "",
+                tool_call_id=tool_call_id,
+                tool_name=result.tool_name,
+                metadata={
+                    "status": result.status,
+                    "error": result.error,
+                    "data": result.data,
+                    "truncated": result.truncated,
+                    "partial": result.partial,
+                    "reference": result.reference,
+                },
+            )
+        )
+    return RuntimeAssembledContext(
+        prompt=context_window.prompt,
+        tool_results=context_window.tool_results,
+        continuity_state=context_window.continuity_state,
+        segments=tuple(segments),
+        metadata=context_window.metadata_payload(),
+    )
 
 
 class _CapturingTurnProvider:
@@ -284,12 +329,14 @@ def test_provider_provider_graph_requests_tool_on_first_turn() -> None:
         provider_model=provider_model,
     )
 
+    request_context = RuntimeContextWindow(prompt="read sample.txt")
     step = graph.step(
         request=GraphRunRequest(
             session=_session(),
             prompt="read sample.txt",
             available_tools=_tool_definitions(),
-            context_window=RuntimeContextWindow(prompt="read sample.txt"),
+            context_window=request_context,
+            assembled_context=_assembled_from_context_window(request_context),
         ),
         tool_results=(),
         session=_session(),
@@ -322,22 +369,24 @@ def test_provider_provider_graph_finalizes_after_tool_result() -> None:
         provider_model=provider_model,
     )
 
+    request_context = RuntimeContextWindow(
+        prompt="read sample.txt",
+        tool_results=(
+            ToolResult(
+                tool_name="read_file",
+                content="alpha\n",
+                status="ok",
+                data={"path": "sample.txt", "content": "alpha\n"},
+            ),
+        ),
+    )
     step = graph.step(
         request=GraphRunRequest(
             session=_session(),
             prompt="read sample.txt",
             available_tools=_tool_definitions(),
-            context_window=RuntimeContextWindow(
-                prompt="read sample.txt",
-                tool_results=(
-                    ToolResult(
-                        tool_name="read_file",
-                        content="alpha\n",
-                        status="ok",
-                        data={"path": "sample.txt", "content": "alpha\n"},
-                    ),
-                ),
-            ),
+            context_window=request_context,
+            assembled_context=_assembled_from_context_window(request_context),
         ),
         tool_results=(
             ToolResult(
@@ -383,12 +432,14 @@ def test_provider_provider_graph_prefers_nonstream_tool_call_over_text() -> None
         provider_model=provider_model,
     )
 
+    request_context = RuntimeContextWindow(prompt="read sample.txt")
     step = graph.step(
         request=GraphRunRequest(
             session=_session(),
             prompt="read sample.txt",
             available_tools=_tool_definitions(),
-            context_window=RuntimeContextWindow(prompt="read sample.txt"),
+            context_window=request_context,
+            assembled_context=_assembled_from_context_window(request_context),
         ),
         tool_results=(),
         session=_session(),
@@ -615,39 +666,44 @@ def test_provider_provider_graph_passes_applied_skill_context_to_provider() -> N
             prompt="read sample.txt",
             available_tools=_tool_definitions(),
             context_window=RuntimeContextWindow(prompt="read sample.txt"),
-            applied_skills=(
-                {
-                    "name": "summarize",
-                    "description": "Summarize selected files.",
-                    "content": "# Summarize\nUse concise bullet points.",
-                    "prompt_context": (
-                        "Skill: summarize\n"
-                        "Description: Summarize selected files.\n"
-                        "Instructions:\n# Summarize\nUse concise bullet points."
+            assembled_context=RuntimeAssembledContext(
+                prompt="read sample.txt",
+                tool_results=(),
+                continuity_state=None,
+                segments=(
+                    RuntimeContextSegment(
+                        role="system", content="Runtime-managed skills are active."
                     ),
-                },
+                    RuntimeContextSegment(role="user", content="read sample.txt"),
+                ),
+                metadata={},
             ),
-            skill_prompt_context="Runtime-managed skills are active.",
+            metadata={
+                "applied_skills": [
+                    {
+                        "name": "summarize",
+                        "description": "Summarize selected files.",
+                        "content": "# Summarize\nUse concise bullet points.",
+                        "prompt_context": (
+                            "Skill: summarize\n"
+                            "Description: Summarize selected files.\n"
+                            "Instructions:\n# Summarize\nUse concise bullet points."
+                        ),
+                    }
+                ],
+            },
         ),
         tool_results=(),
         session=_session(),
     )
 
     assert step.output == "done"
-    assert provider.requests[0].applied_skills == (
-        {
-            "name": "summarize",
-            "description": "Summarize selected files.",
-            "content": "# Summarize\nUse concise bullet points.",
-            "prompt_context": (
-                "Skill: summarize\n"
-                "Description: Summarize selected files.\n"
-                "Instructions:\n# Summarize\nUse concise bullet points."
-            ),
-        },
+    assert provider.requests[0].assembled_context is not None
+    assert provider.requests[0].assembled_context.prompt == "read sample.txt"
+    assert provider.requests[0].assembled_context.segments[0].role == "system"
+    assert provider.requests[0].assembled_context.segments[0].content == (
+        "Runtime-managed skills are active."
     )
-    assert provider.requests[0].skill_prompt_context == "Runtime-managed skills are active."
-    assert provider.requests[0].context_window.prompt == "read sample.txt"
 
 
 def test_provider_provider_graph_forwards_agent_preset_to_provider() -> None:
@@ -726,6 +782,7 @@ def test_provider_provider_graph_forwards_bounded_context_window_to_provider() -
             prompt="read sample.txt",
             available_tools=_tool_definitions(),
             context_window=bounded_context,
+            assembled_context=_assembled_from_context_window(bounded_context),
         ),
         tool_results=(
             ToolResult(
@@ -738,10 +795,9 @@ def test_provider_provider_graph_forwards_bounded_context_window_to_provider() -
         session=_session(),
     )
 
-    assert provider.requests[0].context_window is bounded_context
-    assert provider.requests[0].context_window.compacted is True
-    assert provider.requests[0].context_window.retained_tool_result_count == 1
-    assert provider.requests[0].context_window.continuity_state == RuntimeContinuityState(
+    assert provider.requests[0].assembled_context is not None
+    assert provider.requests[0].assembled_context.tool_results == bounded_context.tool_results
+    assert provider.requests[0].assembled_context.continuity_state == RuntimeContinuityState(
         summary_text=(
             "Compacted 2 earlier tool results:\n"
             '1. read_file ok path=sample.txt content_preview="old\\n"\n'
@@ -767,22 +823,24 @@ def test_provider_graph_forwards_explicit_lsp_tool_feedback_to_provider() -> Non
         data={"operation": "definition", "response": {"uri": "file:///workspace/main.py"}},
     )
 
+    request_context = RuntimeContextWindow(
+        prompt="use lsp feedback",
+        tool_results=(lsp_result,),
+    )
     _ = graph.step(
         request=GraphRunRequest(
             session=_session(),
             prompt="use lsp feedback",
             available_tools=_tool_definitions(),
-            context_window=RuntimeContextWindow(
-                prompt="use lsp feedback",
-                tool_results=(lsp_result,),
-            ),
+            context_window=request_context,
+            assembled_context=_assembled_from_context_window(request_context),
         ),
         tool_results=(lsp_result,),
         session=_session(),
     )
 
-    assert provider.requests[0].tool_results == (lsp_result,)
-    assert provider.requests[0].context_window.tool_results == (lsp_result,)
+    assert provider.requests[0].assembled_context is not None
+    assert provider.requests[0].assembled_context.tool_results == (lsp_result,)
 
 
 def test_provider_graph_forwards_mcp_tool_feedback_to_provider() -> None:
@@ -799,22 +857,24 @@ def test_provider_graph_forwards_mcp_tool_feedback_to_provider() -> None:
         data={"server": "echo", "tool": "echo", "is_error": False},
     )
 
+    request_context = RuntimeContextWindow(
+        prompt="use mcp feedback",
+        tool_results=(mcp_result,),
+    )
     _ = graph.step(
         request=GraphRunRequest(
             session=_session(),
             prompt="use mcp feedback",
             available_tools=_tool_definitions(),
-            context_window=RuntimeContextWindow(
-                prompt="use mcp feedback",
-                tool_results=(mcp_result,),
-            ),
+            context_window=request_context,
+            assembled_context=_assembled_from_context_window(request_context),
         ),
         tool_results=(mcp_result,),
         session=_session(),
     )
 
-    assert provider.requests[0].tool_results == (mcp_result,)
-    assert provider.requests[0].context_window.tool_results == (mcp_result,)
+    assert provider.requests[0].assembled_context is not None
+    assert provider.requests[0].assembled_context.tool_results == (mcp_result,)
 
 
 def test_provider_provider_graph_enforces_configured_max_steps() -> None:

@@ -111,9 +111,12 @@ class RuntimeRunLoopCoordinator:
                 session=session,
                 prompt=graph_request.prompt,
                 available_tools=graph_request.available_tools,
-                applied_skills=graph_request.applied_skills,
-                skill_prompt_context=graph_request.skill_prompt_context,
                 context_window=context_window,
+                assembled_context=runtime._assemble_provider_context(
+                    prompt=graph_request.prompt,
+                    tool_results=context_window.tool_results,
+                    session_metadata=session.metadata,
+                ),
                 metadata=graph_request.metadata,
             )
             if context_window.compacted and reinjected_continuity is None:
@@ -258,8 +261,8 @@ class RuntimeRunLoopCoordinator:
                             session=session,
                             prompt=graph_request.prompt,
                             available_tools=graph_request.available_tools,
-                            applied_skills=graph_request.applied_skills,
-                            skill_prompt_context=graph_request.skill_prompt_context,
+                            context_window=graph_request.context_window,
+                            assembled_context=graph_request.assembled_context,
                             metadata={
                                 **graph_request.metadata,
                                 "provider_attempt": provider_attempt,

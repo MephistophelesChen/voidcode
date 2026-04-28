@@ -95,8 +95,10 @@ from .config import (
 )
 from .context_window import (
     ContextWindowPolicy,
+    RuntimeAssembledContext,
     RuntimeContextWindow,
     RuntimeContinuityState,
+    assemble_provider_context,
     prepare_provider_context,
 )
 from .contracts import (
@@ -1564,12 +1566,16 @@ class VoidCodeRuntime:
             session=session,
             prompt=request.prompt,
             available_tools=tool_registry.definitions(),
-            applied_skills=frozen_applied_skills,
-            skill_prompt_context=skill_prompt_context,
             context_window=self._prepare_provider_context_window(
                 prompt=request.prompt,
                 tool_results=(),
                 session_metadata=session.metadata,
+            ),
+            assembled_context=self._assemble_provider_context(
+                prompt=request.prompt,
+                tool_results=(),
+                session_metadata=session.metadata,
+                skill_prompt_context=skill_prompt_context,
             ),
             metadata={
                 **request_metadata,
@@ -4420,6 +4426,34 @@ class VoidCodeRuntime:
             tool_results=tool_results,
             session_metadata=session_metadata,
             policy=policy or self._default_context_window_policy,
+        )
+
+    def _assemble_provider_context(
+        self,
+        *,
+        prompt: str,
+        tool_results: tuple[ToolResult, ...],
+        session_metadata: dict[str, object],
+        skill_prompt_context: str = "",
+    ) -> RuntimeAssembledContext:
+        effective_config = self._effective_runtime_config_from_metadata(session_metadata)
+        provider_attempt = self._provider_attempt_from_metadata(session_metadata)
+        policy = self._context_window_policy_from_config(
+            effective_config.context_window,
+            resolved_provider=None,
+            provider_attempt=provider_attempt,
+        )
+        policy = self._context_window_policy_for_provider_attempt(
+            policy,
+            resolved_provider=effective_config.resolved_provider,
+            provider_attempt=provider_attempt,
+        )
+        return assemble_provider_context(
+            prompt=prompt,
+            tool_results=tool_results,
+            session_metadata=session_metadata,
+            policy=policy or self._default_context_window_policy,
+            skill_prompt_context=skill_prompt_context,
         )
 
     @staticmethod
