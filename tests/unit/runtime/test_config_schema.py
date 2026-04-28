@@ -52,6 +52,7 @@ def test_runtime_config_json_schema_exposes_core_fields() -> None:
 def test_generate_starter_runtime_config_excludes_secrets() -> None:
     payload = generate_starter_runtime_config(
         approval_mode="deny",
+        model="opencode-go/glm-5",
         execution_engine="provider",
         max_steps=7,
         include_examples=True,
@@ -60,6 +61,7 @@ def test_generate_starter_runtime_config_excludes_secrets() -> None:
     assert payload == {
         "$schema": RUNTIME_CONFIG_SCHEMA_ID,
         "approval_mode": "deny",
+        "model": "opencode-go/glm-5",
         "execution_engine": "provider",
         "max_steps": 7,
         "tools": {"builtin": {"enabled": True}},
@@ -72,6 +74,9 @@ def test_generate_starter_runtime_config_excludes_secrets() -> None:
 def test_generate_starter_runtime_config_validates_inputs() -> None:
     with pytest.raises(ValueError, match="approval_mode"):
         generate_starter_runtime_config(approval_mode="always")
+
+    with pytest.raises(ValueError, match="requires model"):
+        generate_starter_runtime_config(execution_engine="provider")
     with pytest.raises(ValueError, match="execution_engine"):
         generate_starter_runtime_config(execution_engine="remote")
     with pytest.raises(ValueError, match="max_steps"):

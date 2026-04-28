@@ -327,6 +327,7 @@ def runtime_config_json_schema() -> dict[str, object]:
 def generate_starter_runtime_config(
     *,
     approval_mode: str = "ask",
+    model: str | None = None,
     execution_engine: str | None = None,
     max_steps: int | None = None,
     include_examples: bool = False,
@@ -346,11 +347,20 @@ def generate_starter_runtime_config(
         )
     if max_steps is not None and max_steps < 1:
         raise ValueError("max_steps must be an integer greater than or equal to 1")
+    if model is not None and not model:
+        raise ValueError("model must be a non-empty provider/model string when provided")
+    if execution_engine == "provider" and model is None:
+        raise ValueError(
+            "execution_engine provider requires model; pass --model provider/model "
+            "or omit execution_engine to use runtime defaults"
+        )
 
     payload: dict[str, object] = {}
     if include_schema_reference:
         payload["$schema"] = RUNTIME_CONFIG_SCHEMA_ID
     payload["approval_mode"] = approval_mode
+    if model is not None:
+        payload["model"] = model
     if execution_engine is not None:
         payload["execution_engine"] = execution_engine
     if max_steps is not None:

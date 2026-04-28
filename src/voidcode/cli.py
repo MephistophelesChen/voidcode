@@ -832,9 +832,8 @@ def _handle_config_init_command(args: argparse.Namespace) -> int:
     try:
         payload = generate_starter_runtime_config(
             approval_mode=cast(str, args.approval_mode),
-            execution_engine=(
-                cast(str | None, getattr(args, "execution_engine", None)) or "provider"
-            ),
+            model=cast(str | None, getattr(args, "model", None)),
+            execution_engine=cast(str | None, getattr(args, "execution_engine", None)),
             max_steps=cast(int | None, getattr(args, "max_steps", None)),
             include_examples=cast(bool, args.with_examples),
         )
@@ -1455,6 +1454,10 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("allow", "deny", "ask"),
         default="ask",
         help="Starter approval mode to write.",
+    )
+    _ = config_init_parser.add_argument(
+        "--model",
+        help="Optional provider/model reference to include in the generated config.",
     )
     _ = config_init_parser.add_argument(
         "--execution-engine",
