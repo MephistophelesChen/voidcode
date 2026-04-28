@@ -225,6 +225,7 @@ def test_runtime_config_defaults_to_provider_for_product_runs(
 
     assert config.execution_engine == "provider"
     assert config.model is None
+    assert RuntimeConfig().execution_engine == "provider"
 
 
 def test_runtime_config_supports_provider_first_opt_in_with_stub_model(
@@ -313,7 +314,10 @@ def test_runtime_persists_context_window_config_for_resume(tmp_path: Path) -> No
     )
     runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(context_window=context_window),
+        config=RuntimeConfig(
+            execution_engine="deterministic",
+            context_window=context_window,
+        ),
     )
 
     response = runtime.run(RuntimeRequest(prompt="read README.md"))
@@ -2671,7 +2675,7 @@ def test_runtime_config_resume_prefers_persisted_session_values_over_fresh_defau
         config=RuntimeConfig(
             approval_mode="allow",
             model="session/model",
-            execution_engine="provider",
+            execution_engine="deterministic",
             max_steps=7,
         ),
     )
@@ -2692,7 +2696,7 @@ def test_runtime_config_resume_prefers_persisted_session_values_over_fresh_defau
 
     assert effective.approval_mode == "allow"
     assert effective.model == "session/model"
-    assert effective.execution_engine == "provider"
+    assert effective.execution_engine == "deterministic"
     assert effective.max_steps == 7
 
 
@@ -2702,7 +2706,7 @@ def test_runtime_config_resume_preserves_persisted_none_plan_precedence(tmp_path
 
     initial_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(plan=None),
+        config=RuntimeConfig(execution_engine="deterministic", plan=None),
     )
     _ = initial_runtime.run(
         RuntimeRequest(prompt="read sample.txt", session_id="resume-plan-none-precedence")
