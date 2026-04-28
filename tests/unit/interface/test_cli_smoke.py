@@ -152,12 +152,14 @@ def _configure_resume_stream(runtime: Any, *streams: Iterable[_StubChunk]) -> No
 def _run_module_cli(
     *args: str, env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[str]:
+    effective_env = with_src_pythonpath(env)
+    effective_env.setdefault("VOIDCODE_EXECUTION_ENGINE", "deterministic")
     return subprocess.run(
         [sys.executable, "-m", "voidcode", *args],
         capture_output=True,
         text=True,
         check=False,
-        env=with_src_pythonpath(env),
+        env=effective_env,
     )
 
 
@@ -1682,6 +1684,8 @@ def test_config_init_prints_starter_config_without_writing() -> None:
             str(workspace),
             "--approval-mode",
             "deny",
+            "--model",
+            "opencode-go/glm-5",
             "--execution-engine",
             "provider",
             "--max-steps",
@@ -1697,6 +1701,7 @@ def test_config_init_prints_starter_config_without_writing() -> None:
     assert payload == {
         "$schema": "https://voidcode.dev/schemas/runtime-config.schema.json",
         "approval_mode": "deny",
+        "model": "opencode-go/glm-5",
         "execution_engine": "provider",
         "max_steps": 8,
         "tools": {"builtin": {"enabled": True}},
@@ -1722,6 +1727,45 @@ def test_config_init_writes_starter_config_and_refuses_overwrite() -> None:
     assert second.returncode != 0
     assert second.stdout == ""
     assert "already exists" in second.stderr
+
+
+def test_config_init_provider_requires_model_without_traceback() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        result = _run_module_cli(
+            "config",
+            "init",
+            "--workspace",
+            str(workspace),
+            "--execution-engine",
+            "provider",
+            "--print",
+        )
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "requires model" in result.stderr
+    assert "Traceback" not in result.stderr
+
+
+def test_config_init_rejects_malformed_model_without_writing() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        workspace = Path(tmp)
+        result = _run_module_cli(
+            "config",
+            "init",
+            "--workspace",
+            str(workspace),
+            "--model",
+            "gpt-5",
+        )
+
+        assert not (workspace / ".voidcode.json").exists()
+
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "provider/model" in result.stderr
+    assert "Traceback" not in result.stderr
 
 
 def test_config_init_invalid_max_steps_returns_error_without_traceback() -> None:

@@ -106,6 +106,13 @@ from voidcode.skills import SkillRegistry
 from voidcode.tools import ToolCall
 from voidcode.tools.contracts import ToolDefinition, ToolResult
 
+pytestmark = pytest.mark.usefixtures("_force_deterministic_engine_default")
+
+
+@pytest.fixture
+def _force_deterministic_engine_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("VOIDCODE_EXECUTION_ENGINE", "deterministic")
+
 
 def test_runtime_top_level_agent_allowlist_matches_manifest_selectability() -> None:
     top_level_manifest_ids = {
@@ -6378,13 +6385,22 @@ def test_runtime_effective_runtime_config_prefers_persisted_session_values(tmp_p
 
     initial_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="allow", model="session/model"),
+        config=RuntimeConfig(
+            approval_mode="allow",
+            execution_engine="deterministic",
+            model="session/model",
+        ),
     )
     _ = initial_runtime.run(RuntimeRequest(prompt="read sample.txt", session_id="config-session"))
 
     resumed_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="deny", model="fresh/model", max_steps=9),
+        config=RuntimeConfig(
+            approval_mode="deny",
+            execution_engine="deterministic",
+            model="fresh/model",
+            max_steps=9,
+        ),
     )
     effective = resumed_runtime.effective_runtime_config(session_id="config-session")
 
@@ -6399,7 +6415,12 @@ def test_runtime_effective_runtime_config_recovers_persisted_max_steps(tmp_path:
 
     initial_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="allow", model="session/model", max_steps=7),
+        config=RuntimeConfig(
+            approval_mode="allow",
+            execution_engine="deterministic",
+            model="session/model",
+            max_steps=7,
+        ),
     )
     response = initial_runtime.run(
         RuntimeRequest(prompt="read sample.txt", session_id="max-steps-session")
@@ -6433,7 +6454,12 @@ def test_runtime_effective_runtime_config_recovers_persisted_max_steps(tmp_path:
 
     resumed_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="deny", model="fresh/model", max_steps=3),
+        config=RuntimeConfig(
+            approval_mode="deny",
+            execution_engine="deterministic",
+            model="fresh/model",
+            max_steps=3,
+        ),
     )
     effective = resumed_runtime.effective_runtime_config(session_id="max-steps-session")
 
@@ -6625,7 +6651,12 @@ def test_runtime_effective_runtime_config_falls_back_for_legacy_sessions(tmp_pat
 
     resumed_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="deny", model="fresh/model", max_steps=9),
+        config=RuntimeConfig(
+            approval_mode="deny",
+            execution_engine="deterministic",
+            model="fresh/model",
+            max_steps=9,
+        ),
     )
     effective = resumed_runtime.effective_runtime_config(session_id="legacy-config-session")
 
@@ -6695,7 +6726,11 @@ def test_runtime_effective_runtime_config_keeps_persisted_non_agent_sessions_cle
 
     initial_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="allow", model="session/model"),
+        config=RuntimeConfig(
+            approval_mode="allow",
+            execution_engine="deterministic",
+            model="session/model",
+        ),
     )
     _ = initial_runtime.run(
         RuntimeRequest(prompt="read sample.txt", session_id="non-agent-session")
@@ -6935,7 +6970,7 @@ def test_runtime_effective_runtime_config_uses_request_metadata_max_steps_for_ne
     runtime = VoidCodeRuntime(
         workspace=tmp_path,
         graph=_SkillCapturingStubGraph(),
-        config=RuntimeConfig(max_steps=6),
+        config=RuntimeConfig(execution_engine="deterministic", max_steps=6),
     )
 
     response = runtime.run(RuntimeRequest(prompt="hello", metadata={"max_steps": 2}))
@@ -7070,7 +7105,7 @@ def test_runtime_effective_runtime_config_preserves_explicit_none_plan_over_fres
 
     initial_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(plan=None),
+        config=RuntimeConfig(execution_engine="deterministic", plan=None),
     )
     response = initial_runtime.run(
         RuntimeRequest(prompt="read sample.txt", session_id="plan-none-session")
@@ -7143,7 +7178,12 @@ def test_runtime_effective_runtime_config_falls_back_to_fresh_max_steps_for_lega
 
     runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="allow", model="session/model", max_steps=5),
+        config=RuntimeConfig(
+            approval_mode="allow",
+            execution_engine="deterministic",
+            model="session/model",
+            max_steps=5,
+        ),
     )
     _ = runtime.run(RuntimeRequest(prompt="read sample.txt", session_id="legacy-max-steps"))
 
@@ -7169,7 +7209,12 @@ def test_runtime_effective_runtime_config_falls_back_to_fresh_max_steps_for_lega
 
     resumed_runtime = VoidCodeRuntime(
         workspace=tmp_path,
-        config=RuntimeConfig(approval_mode="deny", model="fresh/model", max_steps=9),
+        config=RuntimeConfig(
+            approval_mode="deny",
+            execution_engine="deterministic",
+            model="fresh/model",
+            max_steps=9,
+        ),
     )
     effective = resumed_runtime.effective_runtime_config(session_id="legacy-max-steps")
 
@@ -7283,7 +7328,11 @@ def test_runtime_provider_compaction_emits_continuity_state_and_persists_metadat
         providers={
             "opencode": _ScriptedModelProvider(
                 name="opencode",
-                outcomes=(ProviderTurnResult(output="done"),),
+                outcomes=(
+                    ProviderTurnResult(tool_call=ToolCall("read_file", {"filePath": "sample.txt"})),
+                    ProviderTurnResult(tool_call=ToolCall("read_file", {"filePath": "sample.txt"})),
+                    ProviderTurnResult(output="done"),
+                ),
                 created_providers=created_providers,
             )
         }
@@ -7396,11 +7445,22 @@ def test_runtime_provider_turn_usage_is_persisted_in_session_metadata(tmp_path: 
 
 
 def test_runtime_rejects_provider_engine_without_model(tmp_path: Path) -> None:
-    with pytest.raises(ValueError, match="requires a configured model"):
-        _ = VoidCodeRuntime(
-            workspace=tmp_path,
-            config=RuntimeConfig(execution_engine="provider"),
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        config=RuntimeConfig(execution_engine="provider"),
+    )
+
+    stream = runtime.run_stream(
+        RuntimeRequest(
+            prompt="read sample.txt",
+            session_id="missing-provider-model",
         )
+    )
+
+    with pytest.raises(RuntimeRequestError, match="requires a configured provider/model"):
+        _ = next(stream)
+
+    assert runtime.list_sessions() == ()
 
 
 def test_runtime_effective_runtime_config_recovers_provider_engine(tmp_path: Path) -> None:
@@ -7637,7 +7697,7 @@ def test_runtime_partial_request_agent_override_preserves_inherited_agent_fields
     assert response.session.status == "completed"
     assert response.output == "partial override complete"
     assert created_providers
-    assert created_providers[0].requests[0].agent_preset == {
+    assert created_providers[-1].requests[0].agent_preset == {
         "preset": "leader",
         "prompt_profile": "leader",
         "prompt_materialization": _prompt_materialization_payload("leader"),
@@ -8877,7 +8937,10 @@ def test_runtime_persists_resume_checkpoint_for_waiting_session(tmp_path: Path) 
 def test_runtime_session_result_exposes_summary_and_transcript(tmp_path: Path) -> None:
     sample_file = tmp_path / "sample.txt"
     sample_file.write_text("result body\n", encoding="utf-8")
-    runtime = VoidCodeRuntime(workspace=tmp_path, config=RuntimeConfig(approval_mode="allow"))
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        config=RuntimeConfig(approval_mode="allow", execution_engine="deterministic"),
+    )
 
     response = runtime.run(RuntimeRequest(prompt="read sample.txt", session_id="result-session"))
     result = runtime.session_result(session_id="result-session")
@@ -9160,7 +9223,10 @@ def test_answer_question_normalizes_multi_question_response_order(tmp_path: Path
 def test_runtime_notifications_generate_distinct_terminal_ids_per_run(tmp_path: Path) -> None:
     sample_file = tmp_path / "sample.txt"
     sample_file.write_text("repeatable\n", encoding="utf-8")
-    runtime = VoidCodeRuntime(workspace=tmp_path, config=RuntimeConfig(approval_mode="allow"))
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        config=RuntimeConfig(approval_mode="allow", execution_engine="deterministic"),
+    )
 
     first = runtime.run(RuntimeRequest(prompt="read sample.txt"))
     second = runtime.run(RuntimeRequest(prompt="read sample.txt"))

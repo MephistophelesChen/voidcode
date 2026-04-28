@@ -40,6 +40,7 @@ TOOL_TIMEOUT_ENV_VAR = "VOIDCODE_TOOL_TIMEOUT_SECONDS"
 _VALID_APPROVAL_MODES = ("allow", "deny", "ask")
 _VALID_TUI_COMMANDS = ("command_palette", "session_new", "session_resume")
 type ExecutionEngineName = Literal["deterministic", "provider"]
+DEFAULT_EXECUTION_ENGINE: ExecutionEngineName = "provider"
 type RuntimeAgentPresetId = AgentManifestId
 type RuntimeAgentPromptSource = Literal["builtin"]
 
@@ -244,7 +245,7 @@ class RuntimeAgentConfig:
 class RuntimeConfig:
     approval_mode: PermissionDecision = "ask"
     model: str | None = None
-    execution_engine: ExecutionEngineName = "deterministic"
+    execution_engine: ExecutionEngineName = DEFAULT_EXECUTION_ENGINE
     max_steps: int | None = None
     tool_timeout_seconds: int | None = None
     hooks: RuntimeHooksConfig | None = None
@@ -2306,7 +2307,7 @@ def _resolve_execution_engine(
         return repo_local
     if environment is not None:
         return environment
-    return "deterministic"
+    return DEFAULT_EXECUTION_ENGINE
 
 
 def _resolve_max_steps(

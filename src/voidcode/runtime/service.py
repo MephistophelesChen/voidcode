@@ -153,6 +153,7 @@ from .events import (
 from .execution_seams import (
     cache_key_for_effective_config,
     fallback_graph_for_provider_error,
+    provider_model_required_message,
     resolve_runtime_session_routing,
     select_graph_for_effective_config,
 )
@@ -412,7 +413,7 @@ class VoidCodeRuntime:
     _workspace: Path
     _base_tool_registry: ToolRegistry
     _tool_registry: ToolRegistry
-    _graph: RuntimeGraph
+    _graph: RuntimeGraph | None
     _graph_override: RuntimeGraph | None
     _config: RuntimeConfig
     _initial_effective_config: EffectiveRuntimeConfig
@@ -537,9 +538,12 @@ class VoidCodeRuntime:
             agent=initial_agent,
             context_window=initial_context_window,
         )
-        self._graph = graph or self._build_graph_for_engine_from_config(
-            self._initial_effective_config
-        )
+        if graph is not None:
+            self._graph = graph
+        elif self._can_build_graph_for_effective_config(self._initial_effective_config):
+            self._graph = self._build_graph_for_engine_from_config(self._initial_effective_config)
+        else:
+            self._graph = None
         self._permission_policy = permission_policy or PermissionPolicy(
             mode=self._config.approval_mode
         )
@@ -814,6 +818,20 @@ class VoidCodeRuntime:
         graph = select_graph_for_effective_config(config=config).graph
         self._graph_cache[cache_key] = graph
         return graph
+
+    @staticmethod
+    def _can_build_graph_for_effective_config(config: EffectiveRuntimeConfig) -> bool:
+        if config.execution_engine != "provider":
+            return True
+        return config.resolved_provider.active_target.provider is not None
+
+    @staticmethod
+    def _validate_provider_execution_ready(config: EffectiveRuntimeConfig) -> None:
+        if config.execution_engine != "provider":
+            return
+        if config.resolved_provider.active_target.provider is not None:
+            return
+        raise RuntimeRequestError(provider_model_required_message())
 
     def _graph_selection_for_effective_config(
         self,
@@ -1347,6 +1365,8 @@ class VoidCodeRuntime:
     ) -> Iterator[RuntimeStreamChunk]:
         resolved_session_id = session_id or self._resolve_session_id(request)
         effective_config = self._runtime_config_for_request(request)
+        if self._graph_override is None:
+            self._validate_provider_execution_ready(effective_config)
         request_metadata = self._fresh_request_metadata(request.metadata)
         session = SessionState(
             session=SessionRef(id=resolved_session_id, parent_id=request.parent_session_id),
@@ -2980,9 +3000,12 @@ class VoidCodeRuntime:
             context_window=self._config.context_window,
         )
         self._graph_cache = {}
-        self._graph = self._graph_override or self._build_graph_for_engine_from_config(
-            self._initial_effective_config
-        )
+        if self._graph_override is not None:
+            self._graph = self._graph_override
+        elif self._can_build_graph_for_effective_config(self._initial_effective_config):
+            self._graph = self._build_graph_for_engine_from_config(self._initial_effective_config)
+        else:
+            self._graph = None
 
     @staticmethod
     def _debug_event(event: EventEnvelope | None) -> RuntimeSessionDebugEvent | None:
@@ -5418,6 +5441,9 @@ class VoidCodeRuntime:
             and effective_config.agent == self._initial_effective_config.agent
             and effective_config.context_window == self._initial_effective_config.context_window
         ):
+            if self._graph is not None:
+                return self._graph
+            self._graph = self._build_graph_for_engine_from_config(effective_config)
             return self._graph
 
         # Otherwise use cached graph or build new one
