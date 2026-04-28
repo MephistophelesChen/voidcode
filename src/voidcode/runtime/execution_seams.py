@@ -31,6 +31,14 @@ class RuntimeSessionRouting:
     allocate_session_id: bool
 
 
+def provider_model_required_message() -> str:
+    return (
+        "provider execution requires a configured provider/model. "
+        "Run 'voidcode config init --model provider/model' or set VOIDCODE_MODEL, "
+        "or explicitly use execution_engine='deterministic' for test/dev workflows."
+    )
+
+
 def resolve_runtime_session_routing(request: RuntimeRequest) -> RuntimeSessionRouting:
     requested_session_id = request.session_id
     if requested_session_id is not None:
@@ -64,11 +72,7 @@ def build_runtime_graph(
     if engine_name == "deterministic":
         return DeterministicGraph(max_steps=max_steps or 4)
     if provider_model.provider is None:
-        raise ValueError(
-            "provider execution requires a configured provider/model. "
-            "Run 'voidcode config init' and set model to 'provider/model' (or set VOIDCODE_MODEL), "
-            "or explicitly use execution_engine='deterministic' for test/dev workflows."
-        )
+        raise ValueError(provider_model_required_message())
     return ProviderGraph(
         provider=provider_model.provider.turn_provider(),
         provider_model=provider_model,

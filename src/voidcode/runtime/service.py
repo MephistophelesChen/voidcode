@@ -153,6 +153,7 @@ from .events import (
 from .execution_seams import (
     cache_key_for_effective_config,
     fallback_graph_for_provider_error,
+    provider_model_required_message,
     resolve_runtime_session_routing,
     select_graph_for_effective_config,
 )
@@ -824,6 +825,14 @@ class VoidCodeRuntime:
             return True
         return config.resolved_provider.active_target.provider is not None
 
+    @staticmethod
+    def _validate_provider_execution_ready(config: EffectiveRuntimeConfig) -> None:
+        if config.execution_engine != "provider":
+            return
+        if config.resolved_provider.active_target.provider is not None:
+            return
+        raise RuntimeRequestError(provider_model_required_message())
+
     def _graph_selection_for_effective_config(
         self,
         config: EffectiveRuntimeConfig,
@@ -1356,6 +1365,8 @@ class VoidCodeRuntime:
     ) -> Iterator[RuntimeStreamChunk]:
         resolved_session_id = session_id or self._resolve_session_id(request)
         effective_config = self._runtime_config_for_request(request)
+        if self._graph_override is None:
+            self._validate_provider_execution_ready(effective_config)
         request_metadata = self._fresh_request_metadata(request.metadata)
         session = SessionState(
             session=SessionRef(id=resolved_session_id, parent_id=request.parent_session_id),
