@@ -1532,7 +1532,7 @@ class VoidCodeRuntime:
             available_skill_names=tuple(loaded_skill_names),
             selected_skill_names=skill_snapshot.selected_skill_names,
         )
-        skill_prompt_context = skill_snapshot.skill_prompt_context
+        skill_prompt_context = skill_snapshot.skill_prompt_context or catalog_skill_context
         if skills_config is not None and skills_config.enabled is True:
             session = SessionState(
                 session=session.session,
@@ -4467,12 +4467,20 @@ class VoidCodeRuntime:
             resolved_provider=effective_config.resolved_provider,
             provider_attempt=provider_attempt,
         )
+        raw_loaded = session_metadata.get("loaded_skills", [])
+        loaded_skills: tuple[dict[str, object], ...] = ()
+        if isinstance(raw_loaded, list):
+            items: list[dict[str, object]] = [
+                dict[str, object](item) for item in raw_loaded if isinstance(item, dict)
+            ]
+            loaded_skills = tuple(items)
         return assemble_provider_context(
             prompt=prompt,
             tool_results=tool_results,
             session_metadata=session_metadata,
             policy=policy or self._default_context_window_policy,
             skill_prompt_context=skill_prompt_context,
+            loaded_skills=loaded_skills,
         )
 
     @staticmethod

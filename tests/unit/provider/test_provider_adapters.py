@@ -1177,7 +1177,7 @@ def test_opencode_go_provider_uses_user_tool_feedback_for_compatibility(
     assert messages[1]["role"] == "user"
     feedback = messages[1]["content"]
     assert isinstance(feedback, str)
-    assert "tool calls have already completed" in feedback
+    assert "Completed tool calls for current request:" in feedback
     assert '"tool_name": "list"' in feedback
     assert '"arguments": {"path": "."}' in feedback
     assert "tool_calls" not in messages[1]

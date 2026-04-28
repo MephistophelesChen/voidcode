@@ -189,6 +189,7 @@ class RuntimeAssembledContext:
     continuity_state: RuntimeContinuityState | None
     segments: tuple[RuntimeContextSegment, ...]
     metadata: dict[str, object]
+    loaded_skills: tuple[dict[str, object], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -799,6 +800,7 @@ def assemble_provider_context(
     session_metadata: dict[str, object],
     policy: ContextWindowPolicy | None = None,
     skill_prompt_context: str = "",
+    loaded_skills: tuple[dict[str, object], ...] = (),
 ) -> RuntimeAssembledContext:
     context_window = prepare_provider_context(
         prompt=prompt,
@@ -864,4 +866,5 @@ def assemble_provider_context(
         continuity_state=context_window.continuity_state,
         segments=tuple(segments),
         metadata=context_window.metadata_payload(),
+        loaded_skills=loaded_skills,
     )
