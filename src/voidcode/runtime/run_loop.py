@@ -108,12 +108,13 @@ class RuntimeRunLoopCoordinator:
             continuity_to_reinject = None
             session = runtime._session_with_context_window_metadata(current_session, context_window)
             skill_prompt_context = ""
+            preserved_system_segments: list[str] = []
             for segment in graph_request.assembled_context.segments:
                 if segment.role != "system" or not isinstance(segment.content, str):
                     continue
+                preserved_system_segments.append(segment.content)
                 if segment.content.startswith("Runtime-managed skills are active for this turn."):
                     skill_prompt_context = segment.content
-                    break
             graph_request = GraphRunRequest(
                 session=session,
                 prompt=graph_request.prompt,
@@ -124,6 +125,7 @@ class RuntimeRunLoopCoordinator:
                     tool_results=context_window.tool_results,
                     session_metadata=session.metadata,
                     skill_prompt_context=skill_prompt_context,
+                    preserved_system_segments=tuple(preserved_system_segments),
                 ),
                 metadata=graph_request.metadata,
             )

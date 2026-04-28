@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Literal, cast, final
 
 from ..acp import AcpDelegatedExecution, AcpEventEnvelope, AcpRequestEnvelope, AcpResponseEnvelope
 from ..agent import get_builtin_agent_manifest, list_builtin_agent_manifests
+from ..agent.prompts import render_agent_prompt
 from ..command import (
     COMMAND_RESOLVED,
     is_prompt_command,
@@ -4454,6 +4455,7 @@ class VoidCodeRuntime:
         tool_results: tuple[ToolResult, ...],
         session_metadata: dict[str, object],
         skill_prompt_context: str = "",
+        preserved_system_segments: tuple[str, ...] = (),
     ) -> RuntimeAssembledContext:
         effective_config = self._effective_runtime_config_from_metadata(session_metadata)
         provider_attempt = self._provider_attempt_from_metadata(session_metadata)
@@ -4479,12 +4481,22 @@ class VoidCodeRuntime:
                             entry[k] = v
                     typed.append(entry)
             loaded_skills = tuple(typed)
+        raw_agent_preset = session_metadata.get("agent_preset")
+        agent_preset = (
+            cast(dict[str, object], raw_agent_preset)
+            if isinstance(raw_agent_preset, dict)
+            else None
+        )
+        model_family = effective_config.resolved_provider.active_target.selection.provider
+        agent_prompt_context = render_agent_prompt(agent_preset, model_family=model_family) or ""
         return assemble_provider_context(
             prompt=prompt,
             tool_results=tool_results,
             session_metadata=session_metadata,
             policy=policy or self._default_context_window_policy,
+            agent_prompt_context=agent_prompt_context,
             skill_prompt_context=skill_prompt_context,
+            preserved_system_segments=preserved_system_segments,
             loaded_skills=loaded_skills,
             preserved_continuity_state=self._continuity_state_from_session_metadata(
                 session_metadata

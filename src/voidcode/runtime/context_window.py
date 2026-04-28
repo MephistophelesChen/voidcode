@@ -800,6 +800,8 @@ def assemble_provider_context(
     session_metadata: dict[str, object],
     policy: ContextWindowPolicy | None = None,
     skill_prompt_context: str = "",
+    agent_prompt_context: str = "",
+    preserved_system_segments: tuple[str, ...] = (),
     loaded_skills: tuple[dict[str, object], ...] = (),
     preserved_continuity_state: RuntimeContinuityState | None = None,
 ) -> RuntimeAssembledContext:
@@ -810,8 +812,19 @@ def assemble_provider_context(
         policy=policy,
     )
     segments: list[RuntimeContextSegment] = []
-    if skill_prompt_context.strip():
-        segments.append(RuntimeContextSegment(role="system", content=skill_prompt_context.strip()))
+    seen_system_contents: set[str] = set()
+
+    def _append_system_segment(content: str) -> None:
+        normalized = content.strip()
+        if not normalized or normalized in seen_system_contents:
+            return
+        seen_system_contents.add(normalized)
+        segments.append(RuntimeContextSegment(role="system", content=normalized))
+
+    _append_system_segment(agent_prompt_context)
+    for segment_content in preserved_system_segments:
+        _append_system_segment(segment_content)
+    _append_system_segment(skill_prompt_context)
     continuity_state = preserved_continuity_state or context_window.continuity_state
     metadata_payload = context_window.metadata_payload()
     if continuity_state is not None and "continuity_state" not in metadata_payload:
@@ -819,12 +832,7 @@ def assemble_provider_context(
     if continuity_state is not None:
         summary_text = continuity_state.summary_text
         if isinstance(summary_text, str) and summary_text.strip():
-            segments.append(
-                RuntimeContextSegment(
-                    role="system",
-                    content=f"Runtime continuity summary:\n{summary_text.strip()}",
-                )
-            )
+            _append_system_segment(f"Runtime continuity summary:\n{summary_text.strip()}")
     segments.append(RuntimeContextSegment(role="user", content=prompt))
     for index, result in enumerate(context_window.tool_results, start=1):
         raw_tool_call_id = result.data.get("tool_call_id")
