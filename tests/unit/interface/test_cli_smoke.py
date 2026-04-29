@@ -191,11 +191,20 @@ def _runtime_event(
 
 
 def _make_chunk(
-    *, session_id: str, status: str, event: _StubEvent | None = None, output: str | None = None
+    *,
+    session_id: str,
+    status: str,
+    event: _StubEvent | None = None,
+    output: str | None = None,
+    metadata: dict[str, object] | None = None,
 ) -> _StubChunk:
     return _StubChunk(
         kind="output" if output is not None else "event",
-        session=_StubSession(session=_StubSessionRef(id=session_id), status=status),
+        session=_StubSession(
+            session=_StubSessionRef(id=session_id),
+            status=status,
+            metadata=metadata,
+        ),
         event=event,
         output=output,
     )
@@ -633,6 +642,34 @@ def test_run_command_loads_config_and_forwards_it_to_runtime() -> None:
     runtime_class.assert_called_once_with(workspace=workspace, config=config)
     runtime_class.return_value.run_stream.assert_called_once()
     runtime_class.return_value.resume.assert_not_called()
+
+
+def test_run_command_ctrl_c_cancels_active_runtime_session(capsys: Any) -> None:
+    cli = importlib.import_module("voidcode.cli")
+    workspace = Path("/tmp/demo-workspace")
+    config = SimpleNamespace(approval_mode="allow")
+
+    def _interrupted_stream() -> Iterable[_StubChunk]:
+        yield _make_chunk(
+            session_id="interrupt-session",
+            status="running",
+            event=_runtime_event("runtime.request_received", prompt="slow"),
+            metadata={"runtime_state": {"run_id": "cli-run-1"}},
+        )
+        raise KeyboardInterrupt
+
+    with patch.object(cli, "load_runtime_config", autospec=True, return_value=config):
+        with patch.object(cli, "VoidCodeRuntime", autospec=True) as runtime_class:
+            runtime_class.return_value.run_stream.return_value = _interrupted_stream()
+            result = cli.main(["run", "slow", "--workspace", str(workspace)])
+
+    assert result == 130
+    runtime_class.return_value.cancel_session.assert_called_once_with(
+        "interrupt-session",
+        run_id="cli-run-1",
+        reason="cli KeyboardInterrupt",
+    )
+    assert "Interrupted current run." in capsys.readouterr().err
 
 
 def test_run_command_accepts_agent_skills_max_steps_and_provider_stream_flags() -> None:

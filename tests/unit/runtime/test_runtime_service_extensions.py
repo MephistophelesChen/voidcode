@@ -100,6 +100,7 @@ from voidcode.runtime.service import (
     RuntimeRequest,
     RuntimeRequestMetadataPayload,
     RuntimeResponse,
+    RuntimeStreamChunk,
     SessionState,
     ToolRegistry,
     VoidCodeRuntime,
@@ -232,6 +233,31 @@ class _ApprovalThenCaptureSkillGraph:
                     tool_name="write_file", arguments={"path": "alpha.txt", "content": "1"}
                 )
             )
+        return _StubStep(output="done", is_finished=True)
+
+
+class _BlockingApprovalResumeGraph:
+    def __init__(self) -> None:
+        self.resume_started = threading.Event()
+        self.release_resume = threading.Event()
+
+    def step(
+        self,
+        request: GraphRunRequest,
+        tool_results: tuple[object, ...],
+        *,
+        session: SessionState,
+    ) -> _StubStep:
+        _ = request, session
+        if not tool_results:
+            return _StubStep(
+                tool_call=ToolCall(
+                    tool_name="write_file", arguments={"path": "alpha.txt", "content": "1"}
+                )
+            )
+        self.resume_started.set()
+        if not self.release_resume.wait(timeout=2.0):
+            raise RuntimeError("resume was not released")
         return _StubStep(output="done", is_finished=True)
 
 
@@ -1645,6 +1671,140 @@ def test_runtime_session_debug_snapshot_marks_active_running_session(tmp_path: P
     _ = list(stream)
 
 
+def test_runtime_cancel_session_interrupts_active_run(tmp_path: Path) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path, graph=_BackgroundTaskSuccessGraph())
+
+    stream = runtime.run_stream(RuntimeRequest(prompt="cancel me", session_id="active-cancel"))
+    first_chunk = next(stream)
+    result = runtime.cancel_session("active-cancel", reason="test cancellation")
+    remaining_chunks = list(stream)
+
+    failed_events = [
+        chunk.event
+        for chunk in remaining_chunks
+        if chunk.event is not None and chunk.event.event_type == "runtime.failed"
+    ]
+    assert first_chunk.session.status == "running"
+    assert result.status == "interrupted"
+    assert result.interrupted is True
+    assert failed_events
+    assert failed_events[-1].payload["kind"] == "interrupted"
+    assert failed_events[-1].payload["cancelled"] is True
+    assert failed_events[-1].payload["reason"] == "test cancellation"
+
+
+def test_runtime_cancel_session_preserves_older_overlapping_run_after_newer_run_finishes(
+    tmp_path: Path,
+) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path, graph=_BackgroundTaskSuccessGraph())
+
+    first_stream = runtime.run_stream(RuntimeRequest(prompt="first", session_id="overlap-cancel"))
+    first_chunk = next(first_stream)
+    second_stream = runtime.run_stream(RuntimeRequest(prompt="second", session_id="overlap-cancel"))
+    second_chunk = next(second_stream)
+    second_remaining = list(second_stream)
+
+    result = runtime.cancel_session("overlap-cancel", reason="cancel older run")
+    first_remaining = list(first_stream)
+
+    first_failed_events = [
+        chunk.event
+        for chunk in first_remaining
+        if chunk.event is not None and chunk.event.event_type == "runtime.failed"
+    ]
+    assert first_chunk.session.status == "running"
+    assert second_chunk.session.status == "running"
+    assert second_remaining[-1].session.status == "completed"
+    assert result.status == "interrupted"
+    assert result.interrupted is True
+    assert first_failed_events
+    assert first_failed_events[-1].payload["kind"] == "interrupted"
+    assert first_failed_events[-1].payload["reason"] == "cancel older run"
+
+
+def test_runtime_cancel_session_rejects_stale_run_id(tmp_path: Path) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path, graph=_BackgroundTaskSuccessGraph())
+
+    stream = runtime.run_stream(RuntimeRequest(prompt="stale cancel", session_id="stale-cancel"))
+    first_chunk = next(stream)
+    result = runtime.cancel_session("stale-cancel", run_id="older-run")
+    remaining_chunks = list(stream)
+
+    assert first_chunk.session.status == "running"
+    assert result.status == "stale"
+    assert result.interrupted is False
+    assert remaining_chunks[-1].session.status == "completed"
+
+
+def test_runtime_cancel_session_interrupts_active_approval_resume_run(tmp_path: Path) -> None:
+    graph = _BlockingApprovalResumeGraph()
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        graph=graph,
+        config=RuntimeConfig(approval_mode="ask"),
+        permission_policy=PermissionPolicy(mode="ask"),
+    )
+    waiting = runtime.run(RuntimeRequest(prompt="resume cancel", session_id="resume-cancel"))
+    approval_request_id = cast(str, waiting.events[-1].payload["request_id"])
+    chunks: list[object] = []
+    errors: list[BaseException] = []
+
+    def _consume_resume_stream() -> None:
+        try:
+            chunks.extend(
+                runtime.resume_stream(
+                    "resume-cancel",
+                    approval_request_id=approval_request_id,
+                    approval_decision="allow",
+                )
+            )
+        except BaseException as exc:  # pragma: no cover - asserted via errors list
+            errors.append(exc)
+
+    resume_thread = threading.Thread(target=_consume_resume_stream)
+    resume_thread.start()
+    assert graph.resume_started.wait(timeout=1.0) is True
+    active_metadata = _private_attr(runtime, "_active_session_metadata")("resume-cancel")
+    assert isinstance(active_metadata, dict)
+    run_id = cast(str, active_metadata["run_id"])
+
+    result = runtime.cancel_session("resume-cancel", run_id=run_id, reason="resume cancellation")
+    graph.release_resume.set()
+    resume_thread.join(timeout=2.0)
+
+    failed_events = [
+        chunk.event
+        for chunk in chunks
+        if isinstance(chunk, RuntimeStreamChunk)
+        and chunk.event is not None
+        and chunk.event.event_type == "runtime.failed"
+    ]
+    resumed_runtime_states = [
+        cast(dict[str, object], chunk.session.metadata.get("runtime_state", {}))
+        for chunk in chunks
+        if isinstance(chunk, RuntimeStreamChunk)
+    ]
+    assert errors == []
+    assert resume_thread.is_alive() is False
+    assert result.status == "interrupted"
+    assert result.interrupted is True
+    assert failed_events
+    assert failed_events[-1].payload["kind"] == "interrupted"
+    assert failed_events[-1].payload["cancelled"] is True
+    assert failed_events[-1].payload["run_id"] == run_id
+    assert failed_events[-1].payload["reason"] == "resume cancellation"
+    assert any(state.get("run_id") == run_id for state in resumed_runtime_states)
+
+
+def test_runtime_cancel_session_returns_not_active_for_idle_session(tmp_path: Path) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path, graph=_BackgroundTaskSuccessGraph())
+
+    result = runtime.cancel_session("idle-cancel")
+
+    assert result.status == "not_active"
+    assert result.interrupted is False
+
+
 def test_runtime_session_debug_snapshot_prefers_active_state_for_reused_session_id(
     tmp_path: Path,
 ) -> None:
@@ -1700,7 +1860,8 @@ def test_runtime_session_debug_snapshot_preserves_fresh_terminal_state_while_act
     deferred_unregister_session_id: str | None = None
     original_unregister = runtime._unregister_active_session_id  # pyright: ignore[reportPrivateUsage]
 
-    def _defer_unregister(session_id: str) -> None:
+    def _defer_unregister(session_id: str, *, run_id: str | None = None) -> None:
+        _ = run_id
         nonlocal deferred_unregister_session_id
         deferred_unregister_session_id = session_id
 
