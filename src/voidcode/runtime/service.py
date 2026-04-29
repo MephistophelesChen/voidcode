@@ -4269,7 +4269,6 @@ class VoidCodeRuntime:
             or (event.event_type == "graph.loop_step" and event.payload.get("phase") == "finalize")
             or event.event_type
             in {
-                "runtime.session_ended",
                 "runtime.acp_disconnected",
             }
         ):

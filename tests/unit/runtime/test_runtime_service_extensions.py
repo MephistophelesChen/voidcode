@@ -6208,6 +6208,78 @@ def test_runtime_resume_stream_replay_keeps_running_for_midrun_mcp_stop_event(
     assert response_ready_statuses == ["completed"]
 
 
+def test_runtime_resume_stream_replay_keeps_running_for_session_end_hook_event(
+    tmp_path: Path,
+) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path)
+    store = _private_attr(runtime, "_session_store")
+    store.save_run(
+        workspace=tmp_path,
+        request=RuntimeRequest(prompt="session-end replay", session_id="session-end-replay"),
+        response=RuntimeResponse(
+            session=SessionState(
+                session=runtime_service_module.SessionRef(id="session-end-replay"),
+                status="completed",
+                turn=1,
+            ),
+            events=(
+                EventEnvelope(
+                    session_id="session-end-replay",
+                    sequence=1,
+                    event_type="runtime.request_received",
+                    source="runtime",
+                    payload={"prompt": "session-end replay"},
+                ),
+                EventEnvelope(
+                    session_id="session-end-replay",
+                    sequence=2,
+                    event_type="runtime.session_ended",
+                    source="runtime",
+                    payload={"session_status": "completed"},
+                ),
+                EventEnvelope(
+                    session_id="session-end-replay",
+                    sequence=3,
+                    event_type="runtime.mcp_server_stopped",
+                    source="runtime",
+                    payload={
+                        "server": "demo",
+                        "scope": "runtime",
+                        "workspace_root": str(tmp_path),
+                    },
+                ),
+                EventEnvelope(
+                    session_id="session-end-replay",
+                    sequence=4,
+                    event_type="graph.response_ready",
+                    source="graph",
+                    payload={},
+                ),
+            ),
+            output="done",
+        ),
+    )
+
+    replay_chunks = list(runtime.resume_stream("session-end-replay"))
+    session_end_statuses = [
+        chunk.session.status
+        for chunk in replay_chunks
+        if chunk.kind == "event"
+        and chunk.event is not None
+        and chunk.event.event_type == "runtime.session_ended"
+    ]
+    response_ready_statuses = [
+        chunk.session.status
+        for chunk in replay_chunks
+        if chunk.kind == "event"
+        and chunk.event is not None
+        and chunk.event.event_type == "graph.response_ready"
+    ]
+
+    assert session_end_statuses == ["running"]
+    assert response_ready_statuses == ["completed"]
+
+
 def test_runtime_emits_skills_loaded_catalog_without_default_full_injection(tmp_path: Path) -> None:
     skill_dir = tmp_path / ".voidcode" / "skills" / "demo"
     _write_demo_skill(
