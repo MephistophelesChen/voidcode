@@ -4270,8 +4270,6 @@ class VoidCodeRuntime:
             or event.event_type
             in {
                 "runtime.session_ended",
-                "runtime.mcp_server_released",
-                "runtime.mcp_server_stopped",
                 "runtime.acp_disconnected",
             }
         ):
