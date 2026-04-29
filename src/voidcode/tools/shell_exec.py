@@ -29,7 +29,8 @@ def _truncate(text: str | None) -> tuple[str, bool]:
 def _decode_process_output(payload: bytes | None) -> str:
     if payload is None:
         return ""
-    return payload.decode("utf-8", errors="replace")
+    decoded = payload.decode("utf-8", errors="replace")
+    return decoded.replace("\r\n", "\n")
 
 
 def kill_timed_out_process(process: subprocess.Popen[Any]) -> None:
