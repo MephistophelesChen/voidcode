@@ -51,6 +51,8 @@ class McpToolDescriptor:
     description: str
     input_schema: dict[str, Any]
     safety: McpToolSafety = field(default_factory=McpToolSafety)
+    enabled: bool = True
+    disabled_reason: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

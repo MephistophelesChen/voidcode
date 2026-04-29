@@ -69,6 +69,72 @@ _RECOVERABLE_MCP_CALL_ERROR_CODES = frozenset(
 )
 
 
+def _validate_input_schema(raw_schema: object) -> dict[str, object]:
+    if not isinstance(raw_schema, dict):
+        raise ValueError("inputSchema must be a JSON object")
+    schema = dict(cast(dict[str, object], raw_schema))
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        raise ValueError("inputSchema type must be 'object'")
+    required = schema.get("required")
+    if required is not None:
+        if not isinstance(required, list):
+            raise ValueError("inputSchema required must be an array of strings")
+        required_items = cast(list[object], required)
+        if not all(isinstance(item, str) for item in required_items):
+            raise ValueError("inputSchema required must be an array of strings")
+    properties = schema.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise ValueError("inputSchema properties must be an object")
+    return schema
+
+
+def _validate_call_arguments_against_schema(
+    *,
+    tool_name: str,
+    arguments: dict[str, object],
+    input_schema: dict[str, object],
+) -> None:
+    required = input_schema.get("required")
+    if isinstance(required, list):
+        required_items = cast(list[object], required)
+        required_names = [name for name in required_items if isinstance(name, str)]
+        missing = [name for name in required_names if name not in arguments]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"MCP[{tool_name}]: missing required arguments: {joined}")
+
+    properties = input_schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+
+    raw_properties = cast(dict[object, object], properties)
+    for raw_key, raw_expected_schema in raw_properties.items():
+        if not isinstance(raw_key, str):
+            continue
+        if raw_key not in arguments:
+            continue
+        if not isinstance(raw_expected_schema, dict):
+            continue
+        expected_schema = cast(dict[str, object], raw_expected_schema)
+        expected_type = expected_schema.get("type")
+        value = arguments[raw_key]
+        if expected_type == "string" and not isinstance(value, str):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a string")
+        if expected_type == "integer" and (isinstance(value, bool) or not isinstance(value, int)):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an integer")
+        if expected_type == "number" and (
+            isinstance(value, bool) or not isinstance(value, (int, float))
+        ):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a number")
+        if expected_type == "boolean" and not isinstance(value, bool):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a boolean")
+        if expected_type == "array" and not isinstance(value, list):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an array")
+        if expected_type == "object" and not isinstance(value, dict):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an object")
+
+
 # =============================================================================
 # Disabled MCP Manager
 # =============================================================================
@@ -200,6 +266,7 @@ class ManagedMcpManager:
         )
         self._portal_context: AbstractContextManager[BlockingPortal] | None = None
         self._portal: BlockingPortal | None = None
+        self._tool_descriptors_by_server: dict[_McpServerKey, dict[str, McpToolDescriptor]] = {}
 
     @property
     def configuration(self) -> McpConfigState:
@@ -223,20 +290,13 @@ class ManagedMcpManager:
         _ = parent_session_id
         tools: list[McpToolDescriptor] = []
         for server_name in self._configuration.servers:
-            running = self._ensure_running(
-                server_name=server_name,
-                workspace=workspace,
-                owner_session_id=owner_session_id,
+            tools.extend(
+                self._list_tools_for_server(
+                    server_name=server_name,
+                    workspace=workspace,
+                    owner_session_id=owner_session_id,
+                )
             )
-            result = self._call_sdk(
-                running,
-                stage="discovery",
-                method="tools/list",
-                operation=lambda session=running.session: session.list_tools(),
-            )
-            list_result = cast(ListToolsResult, result)
-            for tool in list_result.tools:
-                tools.append(self._descriptor_from_sdk_tool(server_name=server_name, tool=tool))
         return tuple(tools)
 
     def call_tool(
@@ -250,11 +310,53 @@ class ManagedMcpManager:
         parent_session_id: str | None = None,
     ) -> McpToolCallResult:
         _ = parent_session_id
+        server_config = self._configuration.servers.get(server_name)
+        if server_config is None:
+            raise ValueError(f"MCP[{server_name}]: server not found in configuration")
+        key = self._server_key(
+            server_name=server_name,
+            scope=getattr(server_config, "scope", "runtime"),
+            owner_session_id=owner_session_id,
+        )
         running = self._ensure_running(
             server_name=server_name,
             workspace=workspace,
             owner_session_id=owner_session_id,
         )
+        descriptor = self._tool_descriptors_by_server.get(key, {}).get(tool_name)
+        if descriptor is None:
+            _ = self._list_tools_for_server(
+                server_name=server_name,
+                workspace=workspace,
+                owner_session_id=owner_session_id,
+            )
+            descriptor = self._tool_descriptors_by_server.get(key, {}).get(tool_name)
+
+        if descriptor is not None and not descriptor.enabled:
+            raise ValueError(
+                f"MCP[{server_name}/{tool_name}] is disabled: "
+                f"{descriptor.disabled_reason or 'invalid schema'}"
+            )
+
+        if descriptor is not None:
+            try:
+                _validate_call_arguments_against_schema(
+                    tool_name=f"{server_name}/{tool_name}",
+                    arguments=arguments,
+                    input_schema=descriptor.input_schema,
+                )
+            except ValueError as exc:
+                diagnostic = create_diagnostic(
+                    severity=McpDiagnosticSeverity.ERROR,
+                    category="call",
+                    code="invalid_params",
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    reason=str(exc),
+                )
+                self._record_diagnostic(diagnostic)
+                raise
+
         result = self._call_sdk(
             running,
             stage="call",
@@ -402,145 +504,139 @@ class ManagedMcpManager:
         stderr_log: IO[str] | None = None
         transport_context: AbstractContextManager[tuple[object, object]] | None = None
         session_context: AbstractContextManager[ClientSession] | None = None
-        self._state_lock.acquire()
-        try:
+
+        with self._state_lock:
             running = self._running_servers.get(key)
             if running is not None:
                 running.last_used_at = time.monotonic()
                 self._record_server_reused(key=key, workspace_root=running.workspace_root)
                 self._record_server_acquired(key=key, workspace_root=running.workspace_root)
-                self._state_lock.release()
                 return running
-            portal = self._ensure_portal()
-            stderr_log = open(os.devnull, "w", encoding="utf-8")  # noqa: SIM115 - closed in shutdown
-            params = StdioServerParameters(
-                command=server_config.command[0],
-                args=list(server_config.command[1:]),
-                env={**os.environ, **server_config.env},
-                cwd=workspace_root,
-            )
-            pending_transport_context = portal.wrap_async_context_manager(
-                cast(Any, stdio_client(params, errlog=stderr_log))
-            )
-            read_stream, write_stream = pending_transport_context.__enter__()
-            transport_context = pending_transport_context
-            pending_session_context = portal.wrap_async_context_manager(
-                ClientSession(
-                    read_stream,
-                    write_stream,
-                    read_timeout_seconds=self._request_timeout,
-                    client_info=Implementation(
-                        name=MCP_CLIENT_NAME,
-                        version=MCP_CLIENT_VERSION,
-                    ),
+
+            try:
+                portal = self._ensure_portal()
+                stderr_log = open(
+                    os.devnull,
+                    "w",
+                    encoding="utf-8",
+                )  # noqa: SIM115 - closed in shutdown
+                params = StdioServerParameters(
+                    command=server_config.command[0],
+                    args=list(server_config.command[1:]),
+                    env={**os.environ, **server_config.env},
+                    cwd=workspace_root,
                 )
-            )
-            session = pending_session_context.__enter__()
-            session_context = pending_session_context
-            self._record_server_started(
-                key=key,
-                workspace_root=workspace_root,
-                command=list(server_config.command),
-            )
-            initialize_result = cast(
-                InitializeResult,
-                self._call_sdk_session(
-                    session,
-                    stage="startup",
-                    method="initialize",
-                    server_name=server_name,
-                    workspace_root=workspace_root,
-                    operation=lambda session=session: session.initialize(),
-                ),
-            )
-        except FileNotFoundError as exc:
-            self._close_partial_server(
-                session_context=session_context,
-                transport_context=transport_context,
-                stderr_log=stderr_log,
-            )
-            diagnostic = create_diagnostic(
-                severity=McpDiagnosticSeverity.ERROR,
-                category="startup",
-                code="server_startup_failed",
-                server_name=server_name,
-                command=server_config.command[0],
-            )
-            self._record_diagnostic(diagnostic)
-            message = (
-                f"MCP[{server_name}]: failed to start server - cmd not found "
-                f"(command not found): "
-                f"{server_config.command[0]}"
-            )
-            self._record_failure_event(
-                key=key,
-                workspace_root=workspace_root,
-                stage="startup",
-                error=message,
-                command=list(server_config.command),
-                diagnostic=diagnostic,
-            )
-            self._state_lock.release()
-            raise ValueError(message) from exc
-        except Exception as exc:
-            self._close_partial_server(
-                session_context=session_context,
-                transport_context=transport_context,
-                stderr_log=stderr_log,
-            )
-            diagnostic = self._diagnostic_for_exception(
-                exc,
-                server_name=server_name,
-                stage="startup",
-                method="initialize",
-            )
-            self._record_diagnostic(diagnostic)
-            message = self._message_for_exception(
-                exc,
-                fallback=f"MCP[{server_name}]: failed to initialize server",
-            )
-            self._record_failure_event(
-                key=key,
-                workspace_root=workspace_root,
-                stage="startup",
-                error=message,
-                method="initialize",
-                command=list(server_config.command),
-                diagnostic=diagnostic,
-            )
-            if transport_context is not None:
-                self._record_server_stopped(
+                pending_transport_context = portal.wrap_async_context_manager(
+                    cast(Any, stdio_client(params, errlog=stderr_log))
+                )
+                read_stream, write_stream = pending_transport_context.__enter__()
+                transport_context = pending_transport_context
+                pending_session_context = portal.wrap_async_context_manager(
+                    ClientSession(
+                        read_stream,
+                        write_stream,
+                        read_timeout_seconds=self._request_timeout,
+                        client_info=Implementation(
+                            name=MCP_CLIENT_NAME,
+                            version=MCP_CLIENT_VERSION,
+                        ),
+                    )
+                )
+                session = pending_session_context.__enter__()
+                session_context = pending_session_context
+                self._record_server_started(
                     key=key,
                     workspace_root=workspace_root,
-                    preserve_failed_state=True,
+                    command=list(server_config.command),
                 )
-            self._state_lock.release()
-            raise ValueError(message) from exc
+                initialize_result = cast(
+                    InitializeResult,
+                    self._call_sdk_session(
+                        session,
+                        stage="startup",
+                        method="initialize",
+                        server_name=server_name,
+                        workspace_root=workspace_root,
+                        operation=lambda session=session: session.initialize(),
+                    ),
+                )
+            except FileNotFoundError as exc:
+                self._close_partial_server(
+                    session_context=session_context,
+                    transport_context=transport_context,
+                    stderr_log=stderr_log,
+                )
+                diagnostic = create_diagnostic(
+                    severity=McpDiagnosticSeverity.ERROR,
+                    category="startup",
+                    code="server_startup_failed",
+                    server_name=server_name,
+                    command=server_config.command[0],
+                )
+                self._record_diagnostic(diagnostic)
+                message = (
+                    f"MCP[{server_name}]: failed to start server - cmd not found "
+                    f"(command not found): "
+                    f"{server_config.command[0]}"
+                )
+                self._record_failure_event(
+                    key=key,
+                    workspace_root=workspace_root,
+                    stage="startup",
+                    error=message,
+                    command=list(server_config.command),
+                    diagnostic=diagnostic,
+                )
+                raise ValueError(message) from exc
+            except Exception as exc:
+                self._close_partial_server(
+                    session_context=session_context,
+                    transport_context=transport_context,
+                    stderr_log=stderr_log,
+                )
+                diagnostic = self._diagnostic_for_exception(
+                    exc,
+                    server_name=server_name,
+                    stage="startup",
+                    method="initialize",
+                )
+                self._record_diagnostic(diagnostic)
+                message = self._message_for_exception(
+                    exc,
+                    fallback=f"MCP[{server_name}]: failed to initialize server",
+                )
+                self._record_failure_event(
+                    key=key,
+                    workspace_root=workspace_root,
+                    stage="startup",
+                    error=message,
+                    method="initialize",
+                    command=list(server_config.command),
+                    diagnostic=diagnostic,
+                )
+                if transport_context is not None:
+                    self._record_server_stopped(
+                        key=key,
+                        workspace_root=workspace_root,
+                        preserve_failed_state=True,
+                    )
+                raise ValueError(message) from exc
 
-        running = _RunningMcpServer(
-            server_name=server_name,
-            workspace_root=workspace_root,
-            transport_context=transport_context,
-            session_context=session_context,
-            session=session,
-            stderr_log=stderr_log,
-            initialize_result=initialize_result,
-            scope=key.scope,
-            owner_session_id=key.owner_session_id,
-        )
-        with self._state_lock:
-            existing = self._running_servers.get(key)
-            if existing is not None:
-                self._terminate_running_server(running)
-                existing.last_used_at = time.monotonic()
-                self._record_server_reused(key=key, workspace_root=existing.workspace_root)
-                self._state_lock.release()
-                return existing
+            running = _RunningMcpServer(
+                server_name=server_name,
+                workspace_root=workspace_root,
+                transport_context=transport_context,
+                session_context=session_context,
+                session=session,
+                stderr_log=stderr_log,
+                initialize_result=initialize_result,
+                scope=key.scope,
+                owner_session_id=key.owner_session_id,
+            )
             self._running_servers[key] = running
             self._record_server_acquired(key=key, workspace_root=running.workspace_root)
-        _ = initialize_result
-        self._state_lock.release()
-        return running
+            _ = initialize_result
+            return running
 
     def _ensure_portal(self) -> BlockingPortal:
         if self._portal is not None:
@@ -633,13 +729,71 @@ class ManagedMcpManager:
             if annotations is not None
             else McpToolSafety()
         )
-        return McpToolDescriptor(
+        try:
+            input_schema = _validate_input_schema(tool.inputSchema)
+            return McpToolDescriptor(
+                server_name=server_name,
+                tool_name=tool.name,
+                description=tool.description or "",
+                input_schema=input_schema,
+                safety=safety,
+                enabled=True,
+            )
+        except ValueError as exc:
+            diagnostic = create_diagnostic(
+                severity=McpDiagnosticSeverity.ERROR,
+                category="discovery",
+                code="invalid_tool_schema",
+                server_name=server_name,
+                tool_name=tool.name,
+                reason=str(exc),
+            )
+            self._record_diagnostic(diagnostic)
+            return McpToolDescriptor(
+                server_name=server_name,
+                tool_name=tool.name,
+                description=tool.description or "",
+                input_schema={"type": "object", "properties": {}},
+                safety=safety,
+                enabled=False,
+                disabled_reason=str(exc),
+            )
+
+    def _list_tools_for_server(
+        self,
+        *,
+        server_name: str,
+        workspace: Path,
+        owner_session_id: str | None,
+    ) -> tuple[McpToolDescriptor, ...]:
+        server_config = self._configuration.servers.get(server_name)
+        if server_config is None:
+            return ()
+        key = self._server_key(
             server_name=server_name,
-            tool_name=tool.name,
-            description=tool.description or "",
-            input_schema=dict(tool.inputSchema),
-            safety=safety,
+            scope=getattr(server_config, "scope", "runtime"),
+            owner_session_id=owner_session_id,
         )
+        running = self._ensure_running(
+            server_name=server_name,
+            workspace=workspace,
+            owner_session_id=owner_session_id,
+        )
+        result = self._call_sdk(
+            running,
+            stage="discovery",
+            method="tools/list",
+            operation=lambda session=running.session: session.list_tools(),
+        )
+        list_result = cast(ListToolsResult, result)
+        server_descriptors: dict[str, McpToolDescriptor] = {}
+        descriptors: list[McpToolDescriptor] = []
+        for tool in list_result.tools:
+            descriptor = self._descriptor_from_sdk_tool(server_name=server_name, tool=tool)
+            server_descriptors[descriptor.tool_name] = descriptor
+            descriptors.append(descriptor)
+        self._tool_descriptors_by_server[key] = server_descriptors
+        return tuple(descriptors)
 
     @staticmethod
     def _server_key(
@@ -661,6 +815,7 @@ class ManagedMcpManager:
         )
 
     def _stop_running_server(self, key: _McpServerKey) -> None:
+        self._tool_descriptors_by_server.pop(key, None)
         running = self._running_servers.pop(key, None)
         if running is None:
             return
@@ -679,6 +834,7 @@ class ManagedMcpManager:
             scope=scope,
             owner_session_id=owner_session_id if scope == "session" else None,
         )
+        self._tool_descriptors_by_server.pop(key, None)
         with self._state_lock:
             running = self._running_servers.pop(key, None)
         if running is None:

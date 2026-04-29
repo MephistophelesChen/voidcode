@@ -27,13 +27,19 @@ def test_shell_exec_tool_runs_command_in_workspace(tmp_path: Path) -> None:
 
     assert result.tool_name == "shell_exec"
     assert result.status == "ok"
-    assert result.content == f"{tmp_path.resolve()}\n"
+    assert isinstance(result.content, str)
+    assert result.content.strip() == str(tmp_path.resolve())
     assert result.data.get("command") == command
+    assert result.data.get("cwd") == str(tmp_path.resolve())
     assert result.data.get("exit_code") == 0
-    assert result.data.get("stdout") == f"{tmp_path.resolve()}\n"
+    stdout = result.data.get("stdout")
+    assert isinstance(stdout, str)
+    assert stdout.strip() == str(tmp_path.resolve())
     assert result.data.get("stderr") == ""
     assert result.data.get("timeout") == 30
     assert result.data.get("truncated") is False
+    assert result.data.get("stdout_truncated") is False
+    assert result.data.get("stderr_truncated") is False
 
 
 def test_shell_exec_tool_supports_shell_operators(tmp_path: Path) -> None:
@@ -185,3 +191,5 @@ def test_shell_exec_tool_truncates_large_output(tmp_path: Path) -> None:
     assert isinstance(result.content, str)
     assert len(result.content) == 200000
     assert result.data.get("truncated") is True
+    assert result.data.get("stdout_truncated") is True
+    assert result.data.get("output_char_count") == 200000

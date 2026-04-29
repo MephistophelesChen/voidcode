@@ -192,3 +192,67 @@ def test_webfetch_rejects_redirect_to_localhost() -> None:
                 ),
                 workspace=Path("/tmp"),
             )
+
+
+def test_webfetch_rejects_redirect_chain_to_metadata_host() -> None:
+    tool = WebFetchTool()
+    first = httpx.Response(
+        302,
+        headers={"Location": "https://metadata.google.internal/computeMetadata/v1"},
+        request=httpx.Request("GET", "https://example.com/start"),
+    )
+
+    with patch("httpx.Client.request", side_effect=[first]):
+        with pytest.raises(ValueError, match="blocked"):
+            tool.invoke(
+                ToolCall(
+                    tool_name="web_fetch",
+                    arguments={"url": "https://example.com/start", "format": "text"},
+                ),
+                workspace=Path("/tmp"),
+            )
+
+
+def test_webfetch_rejects_ipv4_mapped_ipv6_host() -> None:
+    tool = WebFetchTool()
+
+    with pytest.raises(ValueError, match="blocked"):
+        tool.invoke(
+            ToolCall(
+                tool_name="web_fetch",
+                arguments={"url": "http://[::ffff:127.0.0.1]/", "format": "text"},
+            ),
+            workspace=Path("/tmp"),
+        )
+
+
+def test_webfetch_rejects_url_credentials() -> None:
+    tool = WebFetchTool()
+
+    with pytest.raises(ValueError, match="must not include credentials"):
+        tool.invoke(
+            ToolCall(
+                tool_name="web_fetch",
+                arguments={"url": "https://user:pass@example.com/secret", "format": "text"},
+            ),
+            workspace=Path("/tmp"),
+        )
+
+
+def test_webfetch_fails_when_redirect_location_is_missing() -> None:
+    tool = WebFetchTool()
+    redirect = httpx.Response(
+        302,
+        headers={},
+        request=httpx.Request("GET", "https://example.com/start"),
+    )
+
+    with patch("httpx.Client.request", side_effect=[redirect]):
+        with pytest.raises(ValueError, match="missing location"):
+            tool.invoke(
+                ToolCall(
+                    tool_name="web_fetch",
+                    arguments={"url": "https://example.com/start", "format": "text"},
+                ),
+                workspace=Path("/tmp"),
+            )

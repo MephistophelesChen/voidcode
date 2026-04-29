@@ -4,15 +4,17 @@ import os
 import signal
 import subprocess
 from pathlib import Path
-from typing import ClassVar, final
+from typing import Any, ClassVar, final
 
 from pydantic import ValidationError
 
+from ..security.shell_policy import (
+    DEFAULT_TIMEOUT_SECONDS,
+    resolve_shell_execution_policy,
+)
 from ._pydantic_args import ShellExecArgs
 from .contracts import RuntimeToolTimeoutError, ToolCall, ToolDefinition, ToolResult
 
-DEFAULT_TIMEOUT_SECONDS = 30
-MAX_TIMEOUT_SECONDS = 120
 MAX_OUTPUT_CHARS = 200_000
 
 
@@ -24,7 +26,13 @@ def _truncate(text: str | None) -> tuple[str, bool]:
     return text[:MAX_OUTPUT_CHARS], True
 
 
-def kill_timed_out_process(process: subprocess.Popen[str]) -> None:
+def _decode_process_output(payload: bytes | None) -> str:
+    if payload is None:
+        return ""
+    return payload.decode("utf-8", errors="replace")
+
+
+def kill_timed_out_process(process: subprocess.Popen[Any]) -> None:
     if os.name == "nt":
         taskkill_succeeded = False
         try:
@@ -100,16 +108,13 @@ class ShellExecTool:
         command_text = args.command.strip()
 
         timeout_value = call.arguments.get("timeout", DEFAULT_TIMEOUT_SECONDS)
-        if isinstance(timeout_value, (int, float)) and timeout_value > 0:
-            local_timeout_seconds = min(int(timeout_value), MAX_TIMEOUT_SECONDS)
-        else:
-            local_timeout_seconds = DEFAULT_TIMEOUT_SECONDS
-
-        timeout_seconds = local_timeout_seconds
-        runtime_timeout_selected = False
-        if runtime_timeout_seconds is not None and runtime_timeout_seconds < timeout_seconds:
-            timeout_seconds = runtime_timeout_seconds
-            runtime_timeout_selected = True
+        policy = resolve_shell_execution_policy(
+            workspace=workspace,
+            timeout_argument=timeout_value,
+            runtime_timeout_seconds=runtime_timeout_seconds,
+        )
+        timeout_seconds = policy.timeout_seconds
+        runtime_timeout_selected = policy.runtime_timeout_selected
 
         try:
             creationflags = 0
@@ -117,13 +122,10 @@ class ShellExecTool:
                 creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
             process = subprocess.Popen(
                 command_text,
-                cwd=workspace.resolve(),
+                cwd=policy.workspace_root,
                 shell=True,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
                 start_new_session=True,
                 creationflags=creationflags,
             )
@@ -131,7 +133,7 @@ class ShellExecTool:
             raise ValueError(f"shell_exec failed to execute command: {exc}") from exc
 
         try:
-            stdout, stderr = process.communicate(timeout=timeout_seconds)
+            stdout_bytes, stderr_bytes = process.communicate(timeout=timeout_seconds)
         except subprocess.TimeoutExpired as exc:
             kill_timed_out_process(process)
             process.communicate()
@@ -140,6 +142,9 @@ class ShellExecTool:
                     f"tool '{self.definition.name}' exceeded runtime timeout of {timeout_seconds}s"
                 ) from exc
             raise ValueError(f"shell_exec command timed out after {timeout_seconds}s") from exc
+
+        stdout = _decode_process_output(stdout_bytes)
+        stderr = _decode_process_output(stderr_bytes)
 
         output = stdout
         if stderr:
@@ -155,11 +160,15 @@ class ShellExecTool:
             content=content,
             data={
                 "command": command_text,
+                "cwd": str(policy.workspace_root),
                 "exit_code": process.returncode,
                 "stdout": stdout,
                 "stderr": stderr,
                 "timeout": timeout_seconds,
+                "stdout_truncated": stdout_truncated,
+                "stderr_truncated": stderr_truncated,
                 "truncated": content_truncated or stdout_truncated or stderr_truncated,
+                "output_char_count": len(content),
             },
             truncated=content_truncated or stdout_truncated or stderr_truncated,
             partial=content_truncated or stdout_truncated or stderr_truncated,
