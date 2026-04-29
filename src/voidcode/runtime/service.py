@@ -938,6 +938,7 @@ class VoidCodeRuntime:
                 workspace=self._workspace,
                 owner_session_id=context.session_id if context is not None else None,
             )
+            if tool.enabled
         )
 
     def _refresh_mcp_tools(self) -> None:

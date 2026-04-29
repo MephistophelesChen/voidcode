@@ -69,6 +69,70 @@ _RECOVERABLE_MCP_CALL_ERROR_CODES = frozenset(
 )
 
 
+def _validate_input_schema(raw_schema: object) -> dict[str, object]:
+    if not isinstance(raw_schema, dict):
+        raise ValueError("inputSchema must be a JSON object")
+    schema = dict(cast(dict[str, object], raw_schema))
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        raise ValueError("inputSchema type must be 'object'")
+    required = schema.get("required")
+    if required is not None:
+        if not isinstance(required, list):
+            raise ValueError("inputSchema required must be an array of strings")
+        required_items = cast(list[object], required)
+        if not all(isinstance(item, str) for item in required_items):
+            raise ValueError("inputSchema required must be an array of strings")
+    properties = schema.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise ValueError("inputSchema properties must be an object")
+    return schema
+
+
+def _validate_call_arguments_against_schema(
+    *,
+    tool_name: str,
+    arguments: dict[str, object],
+    input_schema: dict[str, object],
+) -> None:
+    required = input_schema.get("required")
+    if isinstance(required, list):
+        required_items = cast(list[object], required)
+        required_names = [name for name in required_items if isinstance(name, str)]
+        missing = [name for name in required_names if name not in arguments]
+        if missing:
+            joined = ", ".join(missing)
+            raise ValueError(f"MCP[{tool_name}]: missing required arguments: {joined}")
+
+    properties = input_schema.get("properties")
+    if not isinstance(properties, dict):
+        return
+
+    raw_properties = cast(dict[object, object], properties)
+    for raw_key, raw_expected_schema in raw_properties.items():
+        if not isinstance(raw_key, str):
+            continue
+        if raw_key not in arguments:
+            continue
+        if not isinstance(raw_expected_schema, dict):
+            continue
+        expected_schema = cast(dict[str, object], raw_expected_schema)
+        expected_type = expected_schema.get("type")
+        value = arguments[raw_key]
+        if expected_type == "string" and not isinstance(value, str):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a string")
+        if expected_type == "integer" and not isinstance(value, int):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an integer")
+        if expected_type == "number" and not isinstance(value, (int, float)):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a number")
+        if expected_type == "boolean" and not isinstance(value, bool):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be a boolean")
+        if expected_type == "array" and not isinstance(value, list):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an array")
+        if expected_type == "object" and not isinstance(value, dict):
+            raise ValueError(f"MCP[{tool_name}]: argument '{raw_key}' must be an object")
+
+
 # =============================================================================
 # Disabled MCP Manager
 # =============================================================================
@@ -200,6 +264,7 @@ class ManagedMcpManager:
         )
         self._portal_context: AbstractContextManager[BlockingPortal] | None = None
         self._portal: BlockingPortal | None = None
+        self._tool_descriptors_by_server: dict[str, dict[str, McpToolDescriptor]] = {}
 
     @property
     def configuration(self) -> McpConfigState:
@@ -235,8 +300,12 @@ class ManagedMcpManager:
                 operation=lambda session=running.session: session.list_tools(),
             )
             list_result = cast(ListToolsResult, result)
+            server_descriptors: dict[str, McpToolDescriptor] = {}
             for tool in list_result.tools:
-                tools.append(self._descriptor_from_sdk_tool(server_name=server_name, tool=tool))
+                descriptor = self._descriptor_from_sdk_tool(server_name=server_name, tool=tool)
+                server_descriptors[descriptor.tool_name] = descriptor
+                tools.append(descriptor)
+            self._tool_descriptors_by_server[server_name] = server_descriptors
         return tuple(tools)
 
     def call_tool(
@@ -255,6 +324,38 @@ class ManagedMcpManager:
             workspace=workspace,
             owner_session_id=owner_session_id,
         )
+        descriptor = self._tool_descriptors_by_server.get(server_name, {}).get(tool_name)
+        if descriptor is None:
+            discovered = self.list_tools(
+                workspace=workspace,
+                owner_session_id=owner_session_id,
+                parent_session_id=parent_session_id,
+            )
+            _ = discovered
+            descriptor = self._tool_descriptors_by_server.get(server_name, {}).get(tool_name)
+        if descriptor is not None and not descriptor.enabled:
+            raise ValueError(
+                f"MCP[{server_name}/{tool_name}] is disabled: "
+                f"{descriptor.disabled_reason or 'invalid schema'}"
+            )
+        if descriptor is not None:
+            try:
+                _validate_call_arguments_against_schema(
+                    tool_name=f"{server_name}/{tool_name}",
+                    arguments=arguments,
+                    input_schema=descriptor.input_schema,
+                )
+            except ValueError as exc:
+                diagnostic = create_diagnostic(
+                    severity=McpDiagnosticSeverity.ERROR,
+                    category="call",
+                    code="invalid_params",
+                    server_name=server_name,
+                    tool_name=tool_name,
+                    reason=str(exc),
+                )
+                self._record_diagnostic(diagnostic)
+                raise
         result = self._call_sdk(
             running,
             stage="call",
@@ -633,13 +734,35 @@ class ManagedMcpManager:
             if annotations is not None
             else McpToolSafety()
         )
-        return McpToolDescriptor(
-            server_name=server_name,
-            tool_name=tool.name,
-            description=tool.description or "",
-            input_schema=dict(tool.inputSchema),
-            safety=safety,
-        )
+        try:
+            input_schema = _validate_input_schema(tool.inputSchema)
+            return McpToolDescriptor(
+                server_name=server_name,
+                tool_name=tool.name,
+                description=tool.description or "",
+                input_schema=input_schema,
+                safety=safety,
+                enabled=True,
+            )
+        except ValueError as exc:
+            diagnostic = create_diagnostic(
+                severity=McpDiagnosticSeverity.ERROR,
+                category="discovery",
+                code="invalid_tool_schema",
+                server_name=server_name,
+                tool_name=tool.name,
+                reason=str(exc),
+            )
+            self._record_diagnostic(diagnostic)
+            return McpToolDescriptor(
+                server_name=server_name,
+                tool_name=tool.name,
+                description=tool.description or "",
+                input_schema={"type": "object", "properties": {}},
+                safety=safety,
+                enabled=False,
+                disabled_reason=str(exc),
+            )
 
     @staticmethod
     def _server_key(
