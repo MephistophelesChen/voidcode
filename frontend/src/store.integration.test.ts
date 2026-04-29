@@ -2,8 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
   ApprovalDecision,
+  BackgroundTaskSummary,
   EventEnvelope,
+  QuestionAnswer,
+  RuntimeNotification,
   RuntimeResponse,
+  RuntimeSessionDebugSnapshot,
   RuntimeStatusSnapshot,
   RuntimeStreamChunk,
   RuntimeSettings,
@@ -98,6 +102,21 @@ function makeStoredSessionSummary(
   };
 }
 
+function makeBackgroundTaskSummary(
+  taskId: string,
+  prompt: string,
+): BackgroundTaskSummary {
+  return {
+    task: { id: taskId },
+    status: "running",
+    prompt,
+    session_id: "session-1",
+    error: null,
+    created_at: 1,
+    updated_at: 1,
+  };
+}
+
 function makeRuntimeResponse(
   sessionId: string,
   status: SessionState["status"],
@@ -136,6 +155,14 @@ function createDeferred<T>() {
 }
 
 const runtimeClientMocks = vi.hoisted(() => ({
+  openWorkspaceMock:
+    vi.fn<() => Promise<{ current: null; recent: []; candidates: [] }>>(),
+  listProvidersMock: vi.fn<() => Promise<[]>>(),
+  listProviderModelsMock:
+    vi.fn<
+      () => Promise<{ provider: string; configured: boolean; models: [] }>
+    >(),
+  listAgentsMock: vi.fn<() => Promise<[]>>(),
   listSessionsMock: vi.fn<() => Promise<StoredSessionSummary[]>>(),
   getSessionReplayMock:
     vi.fn<(sessionId: string) => Promise<RuntimeResponse>>(),
@@ -157,6 +184,23 @@ const runtimeClientMocks = vi.hoisted(() => ({
         decision: ApprovalDecision,
       ) => Promise<RuntimeResponse>
     >(),
+  answerQuestionMock:
+    vi.fn<
+      (
+        sessionId: string,
+        requestId: string,
+        responses: QuestionAnswer[],
+      ) => Promise<RuntimeResponse>
+    >(),
+  listNotificationsMock: vi.fn<() => Promise<RuntimeNotification[]>>(),
+  acknowledgeNotificationMock:
+    vi.fn<(notificationId: string) => Promise<RuntimeNotification>>(),
+  listBackgroundTasksMock: vi.fn<() => Promise<BackgroundTaskSummary[]>>(),
+  listSessionBackgroundTasksMock:
+    vi.fn<(sessionId: string) => Promise<BackgroundTaskSummary[]>>(),
+  cancelBackgroundTaskMock: vi.fn<(taskId: string) => Promise<unknown>>(),
+  getSessionDebugMock:
+    vi.fn<(sessionId: string) => Promise<RuntimeSessionDebugSnapshot>>(),
   getSettingsMock: vi.fn<() => Promise<RuntimeSettings>>(),
   updateSettingsMock:
     vi.fn<(settings: Record<string, unknown>) => Promise<RuntimeSettings>>(),
@@ -181,12 +225,24 @@ const runtimeClientMocks = vi.hoisted(() => ({
 
 vi.mock("./lib/runtime/client", () => ({
   RuntimeClient: {
+    openWorkspace: runtimeClientMocks.openWorkspaceMock,
+    listProviders: runtimeClientMocks.listProvidersMock,
+    listProviderModels: runtimeClientMocks.listProviderModelsMock,
+    listAgents: runtimeClientMocks.listAgentsMock,
     listSessions: runtimeClientMocks.listSessionsMock,
     getSessionReplay: runtimeClientMocks.getSessionReplayMock,
     getStatus: runtimeClientMocks.getStatusMock,
     retryMcpConnections: runtimeClientMocks.retryMcpConnectionsMock,
     getReview: runtimeClientMocks.getReviewMock,
     resolveApproval: runtimeClientMocks.resolveApprovalMock,
+    answerQuestion: runtimeClientMocks.answerQuestionMock,
+    listNotifications: runtimeClientMocks.listNotificationsMock,
+    acknowledgeNotification: runtimeClientMocks.acknowledgeNotificationMock,
+    listBackgroundTasks: runtimeClientMocks.listBackgroundTasksMock,
+    listSessionBackgroundTasks:
+      runtimeClientMocks.listSessionBackgroundTasksMock,
+    cancelBackgroundTask: runtimeClientMocks.cancelBackgroundTaskMock,
+    getSessionDebug: runtimeClientMocks.getSessionDebugMock,
     getSettings: runtimeClientMocks.getSettingsMock,
     updateSettings: runtimeClientMocks.updateSettingsMock,
     validateProviderCredentials:
@@ -233,6 +289,17 @@ describe("useAppStore integration flow", () => {
       runError: null,
       approvalStatus: "idle",
       approvalError: null,
+      questionStatus: "idle",
+      questionError: null,
+      notifications: [],
+      notificationsStatus: "idle",
+      notificationsError: null,
+      backgroundTasks: [],
+      backgroundTasksStatus: "idle",
+      backgroundTasksError: null,
+      sessionDebug: null,
+      sessionDebugStatus: "idle",
+      sessionDebugError: null,
       replayRequestId: 0,
       statusSnapshot: null,
       statusStatus: "idle",
@@ -251,6 +318,18 @@ describe("useAppStore integration flow", () => {
       settingsStatus: "idle",
       settingsError: null,
     });
+    runtimeClientMocks.openWorkspaceMock.mockResolvedValue({
+      current: null,
+      recent: [],
+      candidates: [],
+    });
+    runtimeClientMocks.listProvidersMock.mockResolvedValue([]);
+    runtimeClientMocks.listProviderModelsMock.mockResolvedValue({
+      provider: "opencode-go",
+      configured: true,
+      models: [],
+    });
+    runtimeClientMocks.listAgentsMock.mockResolvedValue([]);
     runtimeClientMocks.listSessionsMock.mockResolvedValue([]);
     runtimeClientMocks.getStatusMock.mockResolvedValue(emptyStatusSnapshot);
     runtimeClientMocks.retryMcpConnectionsMock.mockResolvedValue(
@@ -264,6 +343,28 @@ describe("useAppStore integration flow", () => {
     });
     runtimeClientMocks.getSettingsMock.mockResolvedValue({});
     runtimeClientMocks.updateSettingsMock.mockResolvedValue({});
+    runtimeClientMocks.listNotificationsMock.mockResolvedValue([]);
+    runtimeClientMocks.listBackgroundTasksMock.mockResolvedValue([]);
+    runtimeClientMocks.listSessionBackgroundTasksMock.mockResolvedValue([]);
+    runtimeClientMocks.cancelBackgroundTaskMock.mockResolvedValue({});
+    runtimeClientMocks.getSessionDebugMock.mockResolvedValue({
+      session: makeSessionState("session-1", "completed"),
+      prompt: "read README.md",
+      persisted_status: "completed",
+      current_status: "completed",
+      active: false,
+      resumable: false,
+      replayable: true,
+      terminal: true,
+      pending_approval: null,
+      pending_question: null,
+      last_relevant_event: null,
+      last_failure_event: null,
+      failure: null,
+      last_tool: null,
+      suggested_operator_action: null,
+      operator_guidance: null,
+    });
     runtimeClientMocks.validateProviderCredentialsMock.mockResolvedValue({
       provider: "opencode-go",
       configured: true,
@@ -382,6 +483,85 @@ describe("useAppStore integration flow", () => {
     expect(state.currentSessionState?.status).toBe("completed");
     expect(state.currentSessionOutput).toBe("hello");
     expect(state.currentSessionEvents).toEqual(completedResponse.events);
+  });
+
+  it("handles run -> waiting question -> answer through the real store", async () => {
+    const sessionId = "session-question";
+    const requestId = "question-1";
+    const requestReceived = makeEvent(
+      1,
+      "runtime.request_received",
+      { prompt: "ask a direction" },
+      "runtime",
+      sessionId,
+    );
+    const questionRequested = makeEvent(
+      2,
+      "runtime.question_requested",
+      {
+        request_id: requestId,
+        tool: "question",
+        question_count: 1,
+        questions: [
+          {
+            header: "Direction",
+            question: "Which path?",
+            multiple: false,
+            options: [],
+          },
+        ],
+      },
+      "runtime",
+      sessionId,
+    );
+    const questionAnswered = makeEvent(
+      3,
+      "runtime.question_answered",
+      { request_id: requestId },
+      "runtime",
+      sessionId,
+    );
+    const responseReady = makeEvent(
+      4,
+      "graph.response_ready",
+      { output: "continued" },
+      "graph",
+      sessionId,
+    );
+    const completedResponse = makeRuntimeResponse(
+      sessionId,
+      "completed",
+      [requestReceived, questionRequested, questionAnswered, responseReady],
+      "continued",
+    );
+
+    async function* stream() {
+      yield makeStreamChunk(sessionId, "running", requestReceived);
+      yield makeStreamChunk(sessionId, "waiting", questionRequested);
+    }
+
+    runtimeClientMocks.runStreamMock.mockReturnValue(stream());
+    runtimeClientMocks.answerQuestionMock.mockResolvedValue(completedResponse);
+    runtimeClientMocks.listSessionsMock.mockResolvedValue([
+      makeStoredSessionSummary(sessionId, "completed", "ask a direction"),
+    ]);
+
+    const store = useAppStore.getState();
+    await store.runTask("ask a direction");
+
+    let state = useAppStore.getState();
+    expect(state.runError).toBeNull();
+    expect(state.currentSessionState?.status).toBe("waiting");
+    await state.answerQuestion([{ header: "Direction", answers: ["left"] }]);
+
+    state = useAppStore.getState();
+    expect(runtimeClientMocks.answerQuestionMock).toHaveBeenCalledWith(
+      sessionId,
+      requestId,
+      [{ header: "Direction", answers: ["left"] }],
+    );
+    expect(state.currentSessionState?.status).toBe("completed");
+    expect(state.currentSessionOutput).toBe("continued");
   });
 
   it("handles deny and preserves failed replay through the real store", async () => {
@@ -546,6 +726,122 @@ describe("useAppStore integration flow", () => {
     expect(state.currentSessionId).toBeNull();
     expect(state.replayError).toBeNull();
   });
+
+  it("reloads runtime ops data after switching workspaces", async () => {
+    const notification: RuntimeNotification = {
+      id: "notification-1",
+      session: { id: "session-1" },
+      kind: "completion",
+      status: "unread",
+      summary: "Task completed",
+      event_sequence: 1,
+      created_at: 1,
+      acknowledged_at: null,
+      payload: {},
+    };
+    const task = makeBackgroundTaskSummary("task-1", "inspect workspace");
+    runtimeClientMocks.listNotificationsMock.mockResolvedValue([notification]);
+    runtimeClientMocks.listBackgroundTasksMock.mockResolvedValue([task]);
+
+    await useAppStore.getState().switchWorkspace("/new-workspace");
+
+    const state = useAppStore.getState();
+    expect(runtimeClientMocks.listNotificationsMock).toHaveBeenCalled();
+    expect(runtimeClientMocks.listBackgroundTasksMock).toHaveBeenCalled();
+    expect(state.notifications).toEqual([notification]);
+    expect(state.backgroundTasks).toEqual([task]);
+  });
+
+  it("refreshes session-scoped background tasks after selecting a session", async () => {
+    const firstTask = makeBackgroundTaskSummary("task-a", "old session task");
+    const secondTask = makeBackgroundTaskSummary(
+      "task-b",
+      "selected session task",
+    );
+    const replay = makeRuntimeResponse(
+      "session-2",
+      "completed",
+      [
+        makeEvent(
+          1,
+          "runtime.request_received",
+          { prompt: "read selected.txt" },
+          "runtime",
+          "session-2",
+        ),
+      ],
+      "selected",
+    );
+    useAppStore.setState({
+      currentSessionId: "session-1",
+      backgroundTasks: [firstTask],
+    });
+    runtimeClientMocks.getSessionReplayMock.mockResolvedValue(replay);
+    runtimeClientMocks.listSessionBackgroundTasksMock.mockResolvedValue([
+      secondTask,
+    ]);
+
+    await useAppStore.getState().selectSession("session-2");
+
+    const state = useAppStore.getState();
+    expect(
+      runtimeClientMocks.listSessionBackgroundTasksMock,
+    ).toHaveBeenCalledWith("session-2");
+    expect(state.backgroundTasks).toEqual([secondTask]);
+  });
+
+  it("reloads global background tasks when selecting a new session", async () => {
+    const sessionTask = makeBackgroundTaskSummary("task-a", "old session task");
+    const globalTask = makeBackgroundTaskSummary("task-global", "global task");
+    useAppStore.setState({
+      currentSessionId: "session-1",
+      backgroundTasks: [sessionTask],
+    });
+    runtimeClientMocks.listBackgroundTasksMock.mockResolvedValue([globalTask]);
+
+    await useAppStore.getState().selectSession("");
+
+    const state = useAppStore.getState();
+    expect(runtimeClientMocks.listBackgroundTasksMock).toHaveBeenCalled();
+    expect(
+      runtimeClientMocks.listSessionBackgroundTasksMock,
+    ).not.toHaveBeenCalled();
+    expect(state.currentSessionId).toBeNull();
+    expect(state.backgroundTasks).toEqual([globalTask]);
+  });
+
+  it("ignores stale background task responses after session scope changes", async () => {
+    const staleTask = makeBackgroundTaskSummary("task-stale", "stale task");
+    const currentTask = makeBackgroundTaskSummary(
+      "task-current",
+      "current task",
+    );
+    const firstRequest = createDeferred<BackgroundTaskSummary[]>();
+    useAppStore.setState({ currentSessionId: "session-1" });
+    runtimeClientMocks.listSessionBackgroundTasksMock.mockReturnValueOnce(
+      firstRequest.promise,
+    );
+
+    const staleLoad = useAppStore.getState().loadBackgroundTasks();
+    useAppStore.setState({ currentSessionId: "session-2" });
+    runtimeClientMocks.listSessionBackgroundTasksMock.mockResolvedValueOnce([
+      currentTask,
+    ]);
+    await useAppStore.getState().loadBackgroundTasks();
+
+    firstRequest.resolve([staleTask]);
+    await staleLoad;
+
+    const state = useAppStore.getState();
+    expect(
+      runtimeClientMocks.listSessionBackgroundTasksMock,
+    ).toHaveBeenNthCalledWith(1, "session-1");
+    expect(
+      runtimeClientMocks.listSessionBackgroundTasksMock,
+    ).toHaveBeenNthCalledWith(2, "session-2");
+    expect(state.backgroundTasks).toEqual([currentTask]);
+  });
+
   it("surfaces approval lookup failure when no pending request exists", async () => {
     const sessionId = "broken-session";
     const requestReceived = makeEvent(
