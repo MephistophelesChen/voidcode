@@ -313,6 +313,7 @@ def create_doctor_for_config(
                     check_type=DoctorCheckType.PROVIDER_READINESS.value,
                     details={
                         "model": config.model,
+                        "execution_engine": config.execution_engine,
                         "status": "invalid_config",
                     },
                     error_message=str(exc),
@@ -335,6 +336,7 @@ def create_doctor_for_config(
                     "model": readiness.model,
                     "configured": readiness.configured,
                     "auth_present": readiness.auth_present,
+                    "streaming_configured": readiness.streaming_configured,
                     "streaming_supported": readiness.streaming_supported,
                     "context_window": readiness.context_window,
                     "max_output_tokens": readiness.max_output_tokens,
