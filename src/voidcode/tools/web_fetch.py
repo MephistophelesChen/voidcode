@@ -1,78 +1,18 @@
 from __future__ import annotations
 
 import base64
-import ipaddress
 import re
-import socket
-import urllib.parse
 from pathlib import Path
 from typing import ClassVar
 
 import httpx
 from bs4 import BeautifulSoup
 
+from ..security.url_policy import validate_redirect_target, validate_url
 from .contracts import ToolCall, ToolDefinition, ToolResult
 
 MAX_RESPONSE_SIZE = 5 * 1024 * 1024
 DEFAULT_TIMEOUT = 30
-
-
-def _is_private_or_loopback_host(hostname: str) -> bool:
-    blocked_hostnames = {
-        "localhost",
-        "metadata.google.internal",
-        "metadata",
-    }
-    lower = hostname.lower().strip(".")
-    if lower in blocked_hostnames:
-        return True
-
-    try:
-        ip = ipaddress.ip_address(lower)
-        return bool(
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        )
-    except ValueError:
-        pass
-
-    try:
-        infos = socket.getaddrinfo(hostname, None)
-    except socket.gaierror:
-        return False
-
-    for info in infos:
-        address = info[4][0]
-        try:
-            ip = ipaddress.ip_address(address)
-        except ValueError:
-            continue
-        if (
-            ip.is_private
-            or ip.is_loopback
-            or ip.is_link_local
-            or ip.is_reserved
-            or ip.is_multicast
-            or ip.is_unspecified
-        ):
-            return True
-    return False
-
-
-def _validate_fetch_url(url_value: str) -> None:
-    parsed = urllib.parse.urlparse(url_value)
-    if parsed.scheme not in ("http", "https"):
-        raise ValueError("web_fetch url must start with http:// or https://")
-
-    if not parsed.hostname:
-        raise ValueError("web_fetch url must include a hostname")
-
-    if _is_private_or_loopback_host(parsed.hostname):
-        raise ValueError("web_fetch target host is blocked for security reasons")
 
 
 def _extract_text_from_html(html: str) -> str:
@@ -155,7 +95,7 @@ class WebFetchTool:
         if not isinstance(url_value, str):
             raise ValueError("web_fetch requires a string url argument")
 
-        _validate_fetch_url(url_value)
+        _ = validate_url(url_value)
 
         format_value = call.arguments.get("format", "markdown")
         if not isinstance(format_value, str) or format_value not in ("text", "markdown", "html"):
@@ -214,9 +154,10 @@ class WebFetchTool:
                             raise ValueError(
                                 "Failed to fetch URL: redirect response missing location"
                             )
-                        redirected_url = urllib.parse.urljoin(current_url, location)
-                        _validate_fetch_url(redirected_url)
-                        current_url = redirected_url
+                        redirected = validate_redirect_target(
+                            base_url=current_url, location=location
+                        )
+                        current_url = redirected.url
                         continue
 
                     if response.status_code >= 400:
@@ -225,7 +166,7 @@ class WebFetchTool:
                         )
 
                     final_url = str(response.url)
-                    _validate_fetch_url(final_url)
+                    _ = validate_url(final_url)
                     content_type = response.headers.get("Content-Type", "")
                     content_length = response.headers.get("Content-Length")
 
