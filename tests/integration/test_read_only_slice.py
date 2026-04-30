@@ -22,6 +22,11 @@ import pytest
 
 pytestmark = pytest.mark.usefixtures("force_deterministic_engine_default")
 
+_DEFAULT_PERMISSION_METADATA = {
+    "external_directory_read": {"*": "ask"},
+    "external_directory_write": {"*": "deny"},
+}
+
 
 @pytest.fixture
 def force_deterministic_engine_default(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -332,6 +337,27 @@ class _SingleToolGraph:
                 )(
                     tool_name=self._tool_name,
                     arguments=self._arguments,
+                ),
+            )
+        return _GraphStep(events=(), tool_call=None, output="done", is_finished=True)
+
+
+class _SequentialToolGraph:
+    def __init__(self, calls: tuple[tuple[str, dict[str, object]], ...]) -> None:
+        self._calls = calls
+
+    def step(self, request: object, tool_results: tuple[object, ...], *, session: object) -> object:
+        _ = request, session
+        if len(tool_results) < len(self._calls):
+            tool_name, arguments = self._calls[len(tool_results)]
+            return _GraphStep(
+                events=(),
+                tool_call=cast(
+                    ToolCallFactory,
+                    importlib.import_module("voidcode.tools.contracts").ToolCall,
+                )(
+                    tool_name=tool_name,
+                    arguments=arguments,
                 ),
             )
         return _GraphStep(events=(), tool_call=None, output="done", is_finished=True)
@@ -2746,6 +2772,152 @@ def test_runtime_denies_shell_exec_external_write_when_permission_rule_denies(
     assert outside_file.exists() is False
 
 
+def test_runtime_denies_shell_exec_dot_parent_external_write_when_rule_denies(
+    tmp_path: Path,
+) -> None:
+    if sys.platform.startswith("win"):
+        pytest.skip("POSIX shell redirection syntax is required for this regression")
+
+    runtime_request, runtime_class = _load_runtime_types()
+    permission_module = importlib.import_module("voidcode.runtime.permission")
+    config_module = importlib.import_module("voidcode.runtime.config")
+
+    policy = cast(Callable[..., object], permission_module.PermissionPolicy)(mode="allow")
+    runtime_config = cast(Callable[..., object], config_module.RuntimeConfig)
+    permission_config = cast(
+        Callable[..., object],
+        config_module.ExternalDirectoryPermissionConfig,
+    )
+    policy_config = cast(Callable[..., object], config_module.ExternalDirectoryPolicy)
+
+    outside_file = tmp_path.parent / "dot-parent-shell-write.txt"
+    relative_external = "./../dot-parent-shell-write.txt"
+
+    runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                config=runtime_config(
+                    approval_mode="allow",
+                    permission=permission_config(
+                        read=policy_config(rules=(("*", "allow"),)),
+                        write=policy_config(rules=(("*", "deny"),)),
+                    ),
+                ),
+                graph=_SingleToolGraph(
+                    "shell_exec",
+                    {"command": f"printf blocked > {shlex.quote(relative_external)}"},
+                ),
+                permission_policy=policy,
+            ),
+        ),
+    )
+
+    denied = runtime.run(
+        runtime_request(prompt="dot parent shell write", session_id="dot-parent-shell-write-deny")
+    )
+
+    assert denied.session.status == "failed"
+    assert denied.events[-2].event_type == "runtime.approval_resolved"
+    assert denied.events[-2].payload["decision"] == "deny"
+    assert denied.events[-2].payload["path_scope"] == "external"
+    assert denied.events[-2].payload["operation_class"] == "execute"
+    assert denied.events[-2].payload["policy_surface"] == "external_directory_write"
+    assert denied.events[-2].payload["canonical_path"] == str(outside_file.resolve())
+    assert outside_file.exists() is False
+
+
+def test_runtime_uses_persisted_external_permission_rules_after_resume(
+    tmp_path: Path,
+) -> None:
+    runtime_request, runtime_class = _load_runtime_types()
+    permission_module = importlib.import_module("voidcode.runtime.permission")
+    config_module = importlib.import_module("voidcode.runtime.config")
+
+    policy = cast(Callable[..., object], permission_module.PermissionPolicy)(mode="ask")
+    runtime_config = cast(Callable[..., object], config_module.RuntimeConfig)
+    permission_config = cast(
+        Callable[..., object],
+        config_module.ExternalDirectoryPermissionConfig,
+    )
+    policy_config = cast(Callable[..., object], config_module.ExternalDirectoryPolicy)
+
+    allowed_root = tmp_path.parent / "resume-external-ask"
+    denied_root = tmp_path.parent / "resume-external-deny"
+    allowed_root.mkdir(parents=True, exist_ok=True)
+    denied_root.mkdir(parents=True, exist_ok=True)
+    first_file = allowed_root / "first.txt"
+    second_file = denied_root / "second.txt"
+    graph = _SequentialToolGraph(
+        (
+            ("write_file", {"path": str(first_file), "content": "first"}),
+            ("write_file", {"path": str(second_file), "content": "second"}),
+        )
+    )
+    session_id = "external-rules-stable-resume"
+
+    initial_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                config=runtime_config(
+                    approval_mode="ask",
+                    permission=permission_config(
+                        write=policy_config(
+                            rules=((f"{allowed_root.as_posix()}/**", "ask"), ("*", "deny"))
+                        ),
+                    ),
+                ),
+                graph=graph,
+                permission_policy=policy,
+            ),
+        ),
+    )
+    waiting = initial_runtime.run(runtime_request(prompt="stable rules", session_id=session_id))
+
+    assert waiting.session.status == "waiting"
+    assert waiting.events[-1].payload["matched_rule"] == f"{allowed_root.as_posix()}/**"
+
+    resumed_runtime = cast(
+        RuntimeRunner,
+        cast(
+            object,
+            runtime_class(
+                workspace=tmp_path,
+                config=runtime_config(
+                    approval_mode="allow",
+                    permission=permission_config(
+                        write=policy_config(rules=(("*", "allow"),)),
+                    ),
+                ),
+                graph=graph,
+                permission_policy=cast(Callable[..., object], permission_module.PermissionPolicy)(
+                    mode="allow"
+                ),
+            ),
+        ),
+    )
+    approval_request_id = str(waiting.events[-1].payload["request_id"])
+    denied = resumed_runtime.resume(
+        session_id,
+        approval_request_id=approval_request_id,
+        approval_decision="allow",
+    )
+
+    assert denied.session.status == "failed"
+    assert first_file.read_text(encoding="utf-8") == "first"
+    assert second_file.exists() is False
+    assert denied.events[-2].event_type == "runtime.approval_resolved"
+    assert denied.events[-2].payload["decision"] == "deny"
+    assert denied.events[-2].payload["matched_rule"] == "*"
+    assert denied.events[-2].payload["policy_surface"] == "external_directory_write"
+    assert denied.events[-2].payload["canonical_path"] == str(second_file.resolve())
+
+
 def test_runtime_denies_when_any_external_path_in_patch_is_denied(tmp_path: Path) -> None:
     runtime_request, runtime_class = _load_runtime_types()
     permission_module = importlib.import_module("voidcode.runtime.permission")
@@ -2909,6 +3081,7 @@ def test_provider_runtime_executes_read_path_and_persists_config(tmp_path: Path)
         "lsp": {"configured_enabled": False, "mode": "disabled", "servers": []},
         "mcp": {"configured_enabled": False, "mode": "disabled", "servers": []},
         "model": "opencode/gpt-5.4",
+        "permission": _DEFAULT_PERMISSION_METADATA,
         "provider_fallback": None,
         "resolved_provider": {
             "active_target": {
@@ -3860,6 +4033,7 @@ def test_runtime_resume_uses_persisted_runtime_config_over_fresh_resume_override
         "lsp": {"configured_enabled": False, "mode": "disabled", "servers": []},
         "mcp": {"configured_enabled": False, "mode": "disabled", "servers": []},
         "model": "session/model",
+        "permission": _DEFAULT_PERMISSION_METADATA,
         "provider_fallback": None,
         "resolved_provider": {
             "active_target": {

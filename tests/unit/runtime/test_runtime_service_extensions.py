@@ -118,6 +118,11 @@ from voidcode.tools import ToolCall
 from voidcode.tools.contracts import ToolDefinition, ToolResult
 from voidcode.tools.runtime_context import current_runtime_tool_context
 
+_DEFAULT_PERMISSION_METADATA = {
+    "external_directory_read": {"*": "ask"},
+    "external_directory_write": {"*": "deny"},
+}
+
 pytestmark = pytest.mark.usefixtures("force_deterministic_engine_default")
 
 
@@ -155,6 +160,7 @@ def _private_attr(instance: object, name: str) -> Any:
         ("du -sh /var", ("/var",)),
         ("echo hi > /tmp/out.txt", ("/tmp/out.txt",)),
         ("echo hi 2>/tmp/err.log", ("/tmp/err.log",)),
+        ("echo hi > ./../out.txt", ("./../out.txt",)),
         (r"type C:\temp\out.log", (r"C:\temp\out.log",)),
         (
             r"type C:\Windows\System32\drivers\etc\hosts",
@@ -8179,6 +8185,7 @@ def test_runtime_effective_runtime_config_recovers_persisted_max_steps(tmp_path:
         "max_steps": 7,
         "tool_timeout_seconds": None,
         "model": "session/model",
+        "permission": _DEFAULT_PERMISSION_METADATA,
         "provider_fallback": None,
         "resolved_provider": {
             "active_target": {
@@ -8639,6 +8646,7 @@ def test_runtime_effective_runtime_config_uses_request_metadata_max_steps_for_ne
         "execution_engine": "deterministic",
         "max_steps": 2,
         "tool_timeout_seconds": None,
+        "permission": _DEFAULT_PERMISSION_METADATA,
         "provider_fallback": None,
         "resolved_provider": None,
         "lsp": {"mode": "disabled", "configured_enabled": False, "servers": []},

@@ -177,6 +177,7 @@ from .lsp import LspManager, LspManagerState, LspRequest, LspRequestResult, buil
 from .mcp import McpManager, build_mcp_manager
 from .permission import (
     DelegationGovernance,
+    ExternalDirectoryPolicy,
     OperationClass,
     PathScope,
     PendingApproval,
@@ -226,6 +227,7 @@ _EXECUTABLE_SUBAGENT_PRESETS = frozenset({"advisor", "explore", "product", "rese
 _PERSISTED_RUNTIME_CONFIG_KEYS = frozenset(
     {
         "approval_mode",
+        "permission",
         "execution_engine",
         "max_steps",
         "tool_timeout_seconds",
@@ -2182,14 +2184,13 @@ class VoidCodeRuntime:
             policy_surface = (
                 "external_directory_write" if uses_write_policy else "external_directory_read"
             )
+            permission_config = self._effective_runtime_config_from_metadata(
+                session.metadata
+            ).permission
             decisions: list[tuple[PermissionDecision, str, str]] = []
             for external_path in external_paths:
                 decision, rule = evaluate_external_directory_policy(
-                    policy=(
-                        self._config.permission.write
-                        if uses_write_policy
-                        else self._config.permission.read
-                    ),
+                    policy=permission_config.write if uses_write_policy else permission_config.read,
                     canonical_path=Path(external_path),
                 )
                 decisions.append((decision, rule, external_path))
@@ -2454,7 +2455,7 @@ class VoidCodeRuntime:
                 continue
             if index == 0 and VoidCodeRuntime._looks_like_shell_executable(value):
                 continue
-            if value.startswith("~/") or value.startswith("../") or value.startswith("..\\"):
+            if value.startswith(("~/", "../", "..\\", "./../", ".\\..\\")):
                 candidates.append(value)
                 continue
             if value.startswith("/"):
@@ -5608,6 +5609,7 @@ class VoidCodeRuntime:
         effective_config = config or self._effective_runtime_config_from_metadata(None)
         runtime_config_metadata: dict[str, object] = {
             "approval_mode": effective_config.approval_mode,
+            "permission": _serialize_external_permission_config(effective_config.permission),
             "execution_engine": effective_config.execution_engine,
             "max_steps": effective_config.max_steps,
             "tool_timeout_seconds": effective_config.tool_timeout_seconds,
@@ -6398,6 +6400,10 @@ class VoidCodeRuntime:
         if persisted_approval_mode in ("allow", "deny", "ask"):
             approval_mode = persisted_approval_mode
         permission = self._config.permission
+        if "permission" in runtime_config:
+            permission = _parse_persisted_external_permission_config(
+                runtime_config.get("permission")
+            )
         persisted_model = runtime_config.get("model")
         if persisted_model is None or isinstance(persisted_model, str):
             model = persisted_model
@@ -6630,6 +6636,67 @@ class VoidCodeRuntime:
         if response is None:
             return False
         return True
+
+
+def _serialize_external_permission_config(
+    permission: ExternalDirectoryPermissionConfig,
+) -> dict[str, object]:
+    return {
+        "external_directory_read": dict(permission.read.rules),
+        "external_directory_write": dict(permission.write.rules),
+    }
+
+
+def _parse_persisted_external_permission_config(
+    raw_permission: object,
+) -> ExternalDirectoryPermissionConfig:
+    if not isinstance(raw_permission, dict):
+        raise ValueError("persisted runtime_config permission must be an object")
+    payload = cast(dict[object, object], raw_permission)
+    allowed_keys = {"external_directory_read", "external_directory_write"}
+    unknown_keys = sorted(str(key) for key in payload if key not in allowed_keys)
+    if unknown_keys:
+        raise ValueError(
+            f"persisted runtime_config permission field '{unknown_keys[0]}' is not supported"
+        )
+    return ExternalDirectoryPermissionConfig(
+        read=ExternalDirectoryPolicy(
+            rules=_parse_persisted_external_permission_rules(
+                payload.get("external_directory_read"),
+                field_path="permission.external_directory_read",
+                default=(("*", "ask"),),
+            )
+        ),
+        write=ExternalDirectoryPolicy(
+            rules=_parse_persisted_external_permission_rules(
+                payload.get("external_directory_write"),
+                field_path="permission.external_directory_write",
+                default=(("*", "deny"),),
+            )
+        ),
+    )
+
+
+def _parse_persisted_external_permission_rules(
+    raw_rules: object,
+    *,
+    field_path: str,
+    default: tuple[tuple[str, PermissionDecision], ...],
+) -> tuple[tuple[str, PermissionDecision], ...]:
+    if raw_rules is None:
+        return default
+    if not isinstance(raw_rules, dict):
+        raise ValueError(f"persisted runtime_config {field_path} must be an object")
+    parsed: list[tuple[str, PermissionDecision]] = []
+    for raw_pattern, raw_decision in cast(dict[object, object], raw_rules).items():
+        if not isinstance(raw_pattern, str) or not raw_pattern.strip():
+            raise ValueError(f"persisted runtime_config {field_path} keys must be strings")
+        if raw_decision not in ("allow", "deny", "ask"):
+            raise ValueError(
+                f"persisted runtime_config {field_path}.{raw_pattern} must be allow, deny, or ask"
+            )
+        parsed.append((raw_pattern, raw_decision))
+    return tuple(parsed) if parsed else default
 
 
 @dataclass(frozen=True, slots=True)
