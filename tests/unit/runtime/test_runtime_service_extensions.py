@@ -148,6 +148,28 @@ def _private_attr(instance: object, name: str) -> Any:
     return getattr(instance, name)
 
 
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("ls /etc", ("/etc",)),
+        ("du -sh /var", ("/var",)),
+        ("echo hi > /tmp/out.txt", ("/tmp/out.txt",)),
+        ("echo hi 2>/tmp/err.log", ("/tmp/err.log",)),
+    ],
+)
+def test_runtime_extracts_shell_external_path_candidates(
+    command: str,
+    expected: tuple[str, ...],
+) -> None:
+    assert VoidCodeRuntime._extract_shell_path_candidates(command) == expected
+
+
+def test_runtime_ignores_shell_executable_path_candidate() -> None:
+    command = f'"{sys.executable}" -c "print(1)"'
+
+    assert VoidCodeRuntime._extract_shell_path_candidates(command) == ()
+
+
 @dataclass(slots=True)
 class _StubStep:
     tool_call: ToolCall | None = None

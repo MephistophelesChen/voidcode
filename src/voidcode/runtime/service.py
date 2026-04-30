@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shlex
 import subprocess
 import threading
 from collections.abc import Callable, Iterable, Iterator, Mapping
@@ -2168,17 +2169,16 @@ class VoidCodeRuntime:
         matched_rule: str | None = None
         policy_surface: str | None = None
         if path_scope == "external" and canonical_path is not None:
+            uses_write_policy = operation_class in ("write", "execute")
             policy_surface = (
-                "external_directory_write"
-                if operation_class == "write"
-                else "external_directory_read"
+                "external_directory_write" if uses_write_policy else "external_directory_read"
             )
             decisions: list[tuple[PermissionDecision, str, str]] = []
             for external_path in external_paths:
                 decision, rule = evaluate_external_directory_policy(
                     policy=(
                         self._config.permission.write
-                        if operation_class == "write"
+                        if uses_write_policy
                         else self._config.permission.read
                     ),
                     canonical_path=Path(external_path),
@@ -2429,16 +2429,21 @@ class VoidCodeRuntime:
 
     @staticmethod
     def _extract_shell_path_candidates(command: str) -> tuple[str, ...]:
-        tokens = command.split()
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = command.split()
         candidates: list[str] = []
-        for token in tokens:
-            value = token.strip().strip("\"'`")
+        for index, token in enumerate(tokens):
+            value = VoidCodeRuntime._normalize_shell_path_token(token)
             if not value:
+                continue
+            if index == 0 and VoidCodeRuntime._looks_like_shell_executable(value):
                 continue
             if value.startswith("~/") or value.startswith("../") or value.startswith("..\\"):
                 candidates.append(value)
                 continue
-            if value.startswith("/") and ("/" in value[1:] or "." in value):
+            if value.startswith("/"):
                 candidates.append(value)
                 continue
             if len(value) >= 3 and value[1] == ":" and value[2] in ("\\", "/"):
@@ -2446,6 +2451,19 @@ class VoidCodeRuntime:
                 if suffix.endswith((".txt", ".md", ".py", ".json", ".yaml", ".yml")):
                     candidates.append(value)
         return tuple(candidates)
+
+    @staticmethod
+    def _normalize_shell_path_token(token: str) -> str:
+        value = token.strip().strip("\"'`")
+        while value and value[0].isdigit():
+            value = value[1:]
+        return value.lstrip("<>")
+
+    @staticmethod
+    def _looks_like_shell_executable(value: str) -> bool:
+        if value.startswith(("/", "~/")):
+            return True
+        return len(value) >= 3 and value[1] == ":" and value[2] in ("\\", "/")
 
     def list_sessions(self) -> tuple[StoredSessionSummary, ...]:
         return self._session_store.list_sessions(workspace=self._workspace)
