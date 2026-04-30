@@ -1032,6 +1032,7 @@ class VoidCodeRuntime:
         if isinstance(request_reasoning_effort, str) and request_reasoning_effort:
             resolved = EffectiveRuntimeConfig(
                 approval_mode=resolved.approval_mode,
+                permission=resolved.permission,
                 model=resolved.model,
                 execution_engine=resolved.execution_engine,
                 max_steps=resolved.max_steps,
