@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
-from collections.abc import Iterator
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 if TYPE_CHECKING:
     import litellm as litellm_module
@@ -24,6 +25,7 @@ from ..tools.contracts import ToolCall, ToolDefinition
 from ..tools.output import sanitize_tool_arguments, sanitize_tool_result_data
 from .config import LiteLLMProviderConfig
 from .errors import provider_execution_error_from_api_payload
+from .model_catalog import ToolFeedbackMode, infer_model_metadata
 from .protocol import (
     ProviderExecutionError,
     ProviderStreamEvent,
@@ -33,10 +35,15 @@ from .protocol import (
 )
 
 _DEFAULT_COMPLETION_TIMEOUT_SECONDS = 300.0
+type ReasoningEffortMode = Literal["auto", "direct", "glm_thinking", "disabled"]
 _DIRECT_REASONING_EFFORT_PROVIDERS = frozenset(
     {"openai", "anthropic", "google", "gemini", "vertex_ai", "litellm", "grok"}
 )
 _THINKING_DISABLED_EFFORTS = frozenset({"none", "off", "disable", "disabled"})
+_SYNTHETIC_TOOL_FEEDBACK_PREFIX = "Completed tool calls for current request:"
+_CONTINUITY_SUMMARY_PREFIX = "Runtime continuity summary:"
+
+logger = logging.getLogger(__name__)
 
 
 def _usage_int(raw: object) -> int:
@@ -88,6 +95,14 @@ def _allow_openai_param(kwargs: dict[str, object], param: str) -> None:
     kwargs["allowed_openai_params"] = params
 
 
+def _message_size_chars(message: dict[str, object]) -> int:
+    return len(json.dumps(message, ensure_ascii=False, sort_keys=True, default=str))
+
+
+def _empty_tool_feedback_model_overrides() -> dict[str, ToolFeedbackMode]:
+    return {}
+
+
 def _is_object_json_schema(schema: dict[str, object]) -> bool:
     schema_type = schema.get("type")
     if schema_type == "object":
@@ -137,6 +152,10 @@ class LiteLLMBackendSingleAgentProvider:
     config: LiteLLMProviderConfig | None
     completion_kwargs: dict[str, object] | None = None
     use_raw_model_name: bool = False
+    reasoning_effort_mode: ReasoningEffortMode = "auto"
+    tool_feedback_model_overrides: Mapping[str, ToolFeedbackMode] = field(
+        default_factory=_empty_tool_feedback_model_overrides
+    )
 
     @staticmethod
     def _to_tool_schema(tool: ToolDefinition) -> dict[str, object]:
@@ -169,10 +188,7 @@ class LiteLLMBackendSingleAgentProvider:
                     model_name="unknown",
                     message="litellm provider requires model name",
                 )
-            model_name = request.model_name
-            if self.config is not None and model_name in self.config.model_map:
-                return self.config.model_map[model_name]
-            return model_name
+            return self._mapped_model_name_for_request(request)
         if request.model_name is None:
             raise ProviderExecutionError(
                 kind="invalid_model",
@@ -180,15 +196,19 @@ class LiteLLMBackendSingleAgentProvider:
                 model_name="unknown",
                 message="provider requires model name",
             )
-        if self.config is not None and request.model_name in self.config.model_map:
-            model_name = self.config.model_map[request.model_name]
-        else:
-            model_name = request.model_name
+        model_name = self._mapped_model_name_for_request(request)
         if self.use_raw_model_name:
             return model_name
         if "/" in model_name:
             return model_name
         return f"{self.name}/{model_name}"
+
+    def _mapped_model_name_for_request(self, request: ProviderTurnRequest) -> str:
+        if request.model_name is None:
+            return ""
+        if self.config is not None and request.model_name in self.config.model_map:
+            return self.config.model_map[request.model_name]
+        return request.model_name
 
     def _api_base(self) -> str:
         base_url = None if self.config is None else self.config.base_url
@@ -208,18 +228,24 @@ class LiteLLMBackendSingleAgentProvider:
         if not effort:
             return kwargs
 
+        mode = self.reasoning_effort_mode
         provider_name = (request.provider_name or self.name).lower()
         model_name = (request.model_name or "").lower()
-        if provider_name == "opencode-go":
+        if mode == "disabled":
             return kwargs
-        if provider_name == "glm" or model_name.startswith(("glm-5", "glm-z1")):
+        if mode == "glm_thinking" or (
+            mode == "auto"
+            and (provider_name == "glm" or model_name.startswith(("glm-5", "glm-z1")))
+        ):
             thinking_type = (
                 "disabled" if effort.lower() in _THINKING_DISABLED_EFFORTS else "enabled"
             )
             _merge_extra_body(kwargs, {"thinking": {"type": thinking_type}})
             _allow_openai_param(kwargs, "extra_body")
             return kwargs
-        if provider_name in _DIRECT_REASONING_EFFORT_PROVIDERS:
+        if mode == "direct" or (
+            mode == "auto" and provider_name in _DIRECT_REASONING_EFFORT_PROVIDERS
+        ):
             kwargs["reasoning_effort"] = request.reasoning_effort
         return kwargs
 
@@ -228,10 +254,30 @@ class LiteLLMBackendSingleAgentProvider:
     ) -> dict[str, object]:
         return self._completion_kwargs_for_request(request)
 
+    def _tool_feedback_mode_for_request(self, request: ProviderTurnRequest) -> ToolFeedbackMode:
+        request_model_name = request.model_name
+        mapped_model_name = self._mapped_model_name_for_request(request)
+        mode = self.tool_feedback_model_overrides.get(mapped_model_name)
+        if mode is None and request_model_name is not None:
+            mode = self.tool_feedback_model_overrides.get(request_model_name)
+        if mode is not None:
+            return mode
+        metadata_mode = (
+            None if request.model_metadata is None else request.model_metadata.tool_feedback_mode
+        )
+        if metadata_mode is not None:
+            return metadata_mode
+        provider_name = request.provider_name or self.name
+        if mapped_model_name:
+            inferred = infer_model_metadata(provider_name, mapped_model_name)
+            if inferred is not None and inferred.tool_feedback_mode is not None:
+                return inferred.tool_feedback_mode
+        return "standard"
+
     def _build_messages(self, request: ProviderTurnRequest) -> list[dict[str, object]]:
         assembled_context = request.assembled_context
         messages: list[dict[str, object]] = []
-        if request.provider_name == "opencode-go":
+        if self._tool_feedback_mode_for_request(request) == "synthetic_user_message":
             tool_feedback_lines: list[str] = []
             for segment in assembled_context.segments:
                 if segment.role == "tool":
@@ -353,6 +399,75 @@ class LiteLLMBackendSingleAgentProvider:
             messages.append({"role": segment.role, "content": segment.content})
         return messages
 
+    @staticmethod
+    def _provider_request_diagnostics(
+        *,
+        messages: list[dict[str, object]],
+        request: ProviderTurnRequest,
+    ) -> dict[str, object]:
+        message_sizes = [_message_size_chars(message) for message in messages]
+        largest_index = (
+            max(range(len(message_sizes)), key=message_sizes.__getitem__) if messages else None
+        )
+        largest_message: dict[str, object] | None = None
+        if largest_index is not None:
+            largest = messages[largest_index]
+            largest_message = {
+                "index": largest_index,
+                "role": largest.get("role"),
+                "size_chars": message_sizes[largest_index],
+            }
+            content = largest.get("content")
+            if isinstance(content, str):
+                if content.startswith(_SYNTHETIC_TOOL_FEEDBACK_PREFIX):
+                    largest_message["source"] = "synthetic_tool_feedback"
+                elif content.startswith(_CONTINUITY_SUMMARY_PREFIX):
+                    largest_message["source"] = "continuity_summary"
+
+        synthetic_tool_feedback_size = 0
+        continuity_summary_size = 0
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, str):
+                continue
+            if content.startswith(_SYNTHETIC_TOOL_FEEDBACK_PREFIX):
+                synthetic_tool_feedback_size += len(content)
+            if content.startswith(_CONTINUITY_SUMMARY_PREFIX):
+                continuity_summary_size += len(content)
+
+        context_window = request.context_window
+        return {
+            "message_count": len(messages),
+            "estimated_chars": sum(message_sizes),
+            "largest_message": largest_message,
+            "retained_tool_result_count": context_window.retained_tool_result_count,
+            "synthetic_tool_feedback_size_chars": synthetic_tool_feedback_size,
+            "continuity_summary_size_chars": continuity_summary_size,
+            "compacted": context_window.compacted,
+        }
+
+    def _log_provider_request_diagnostics(
+        self,
+        *,
+        messages: list[dict[str, object]],
+        request: ProviderTurnRequest,
+    ) -> None:
+        diagnostics = self._provider_request_diagnostics(messages=messages, request=request)
+        logger.debug(
+            "provider request diagnostics: provider=%s model=%s messages=%d "
+            "estimated_chars=%d retained_tool_results=%d synthetic_tool_feedback_size=%d "
+            "continuity_summary_size=%d largest_message=%s compacted=%s",
+            request.provider_name or self.name,
+            request.model_name or "unknown",
+            diagnostics["message_count"],
+            diagnostics["estimated_chars"],
+            diagnostics["retained_tool_result_count"],
+            diagnostics["synthetic_tool_feedback_size_chars"],
+            diagnostics["continuity_summary_size_chars"],
+            diagnostics["largest_message"],
+            diagnostics["compacted"],
+        )
+
     def _auth_kwargs(self) -> dict[str, object]:
         if self.config is None:
             return {}
@@ -451,9 +566,11 @@ class LiteLLMBackendSingleAgentProvider:
             if self.config is None or self.config.timeout_seconds is None
             else self.config.timeout_seconds
         )
+        messages = self._build_messages(request)
+        self._log_provider_request_diagnostics(messages=messages, request=request)
         payload: dict[str, object] = {
             "model": model_identifier,
-            "messages": self._build_messages(request),
+            "messages": messages,
             "stream": False,
             "api_base": self._api_base(),
             "timeout": timeout_seconds,
@@ -503,9 +620,11 @@ class LiteLLMBackendSingleAgentProvider:
             if self.config is None or self.config.timeout_seconds is None
             else self.config.timeout_seconds
         )
+        messages = self._build_messages(request)
+        self._log_provider_request_diagnostics(messages=messages, request=request)
         payload: dict[str, object] = {
             "model": model_identifier,
-            "messages": self._build_messages(request),
+            "messages": messages,
             "stream": True,
             "api_base": self._api_base(),
             "timeout": timeout_seconds,

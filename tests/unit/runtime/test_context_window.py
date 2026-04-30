@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import patch
 
 from voidcode.runtime.context_window import (
     ContextWindowPolicy,
+    DroppedToolResultDiagnostic,
     RuntimeAssembledContext,
     RuntimeContextSegment,
     RuntimeContinuityState,
@@ -62,6 +63,20 @@ def _sized_tool_result(index: int, *, content_size: int) -> ToolResult:
         status="ok",
         data={"index": index, "path": f"sample-{index}.txt"},
     )
+
+
+def test_context_window_policy_default_retains_more_tool_results_before_compaction() -> None:
+    policy = ContextWindowPolicy()
+    context = prepare_provider_context(
+        prompt="continue coding task",
+        tool_results=tuple(_tool_result(index) for index in range(1, 8)),
+        session_metadata={},
+        policy=policy,
+    )
+
+    assert policy.max_tool_results == 8
+    assert context.compacted is False
+    assert context.retained_tool_result_count == 7
 
 
 def test_prepare_provider_context_keeps_results_within_limit() -> None:
@@ -129,7 +144,7 @@ def test_assemble_provider_context_injects_active_runtime_todos() -> None:
     ]
 
 
-def test_provider_context_inspector_reports_opencode_go_synthetic_feedback() -> None:
+def test_provider_context_inspector_reports_synthetic_feedback_mode() -> None:
     assembled = assemble_provider_context(
         prompt="continue",
         tool_results=(
@@ -154,10 +169,11 @@ def test_provider_context_inspector_reports_opencode_go_synthetic_feedback() -> 
         model="glm-5",
         execution_engine="provider",
         available_tool_count=3,
+        tool_feedback_mode="synthetic_user_message",
     )
 
     assert snapshot.provider == "opencode-go"
-    assert snapshot.provider_messages[-1].source == "opencode_go_synthetic_tool_feedback"
+    assert snapshot.provider_messages[-1].source == "provider_synthetic_tool_feedback"
     assert snapshot.provider_messages[-1].role == "user"
     synthetic_content = snapshot.provider_messages[-1].content or ""
     assert "Completed tool calls for current request" in synthetic_content
@@ -301,6 +317,13 @@ def test_prepare_provider_context_compacts_old_results_and_reports_metadata() ->
     assert context.continuity_state.dropped_tool_result_count == 2
     assert context.continuity_state.retained_tool_result_count == 2
     assert context.continuity_state.source == "tool_result_window"
+    assert len(context.continuity_state.dropped_tool_results) == 2
+    assert context.continuity_state.dropped_tool_results[0].metadata_payload() == {
+        "tool_name": "read_file",
+        "status": "ok",
+        "index": 1,
+        "estimated_tokens": context.continuity_state.dropped_tool_results[0].estimated_tokens,
+    }
     assert context.continuity_state.summary_text is not None
     assert "Compacted 2 earlier tool results:" in context.continuity_state.summary_text
     assert 'content_preview="content-1"' in context.continuity_state.summary_text
@@ -317,6 +340,9 @@ def test_prepare_provider_context_compacts_old_results_and_reports_metadata() ->
     assert continuity_payload["retained_tool_result_count"] == 2
     assert continuity_payload["source"] == "tool_result_window"
     assert continuity_payload["version"] == 2
+    assert continuity_payload["dropped_tool_results"] == [
+        item.metadata_payload() for item in context.continuity_state.dropped_tool_results
+    ]
     assert context.metadata_payload()["summary_anchor"] == context.summary_anchor
     assert context.metadata_payload()["summary_source"] == context.summary_source
 
@@ -710,6 +736,66 @@ def test_prepare_provider_context_continuity_metadata_includes_version() -> None
     assert payload.get("objective") == "read sample.txt"
 
 
+def test_prepare_provider_context_dropped_tool_diagnostics_omit_raw_content() -> None:
+    context = prepare_provider_context(
+        prompt="write secret.txt",
+        tool_results=(
+            ToolResult(
+                tool_name="write_file",
+                status="ok",
+                content="RAW SECRET CONTENT SHOULD NOT BE COPIED",
+                data={
+                    "tool_call_id": "write-1",
+                    "arguments": {"path": "secret.txt", "content": "hidden"},
+                    "path": "secret.txt",
+                },
+            ),
+            ToolResult(tool_name="list", status="ok", content="secret.txt", data={}),
+        ),
+        session_metadata={},
+        policy=ContextWindowPolicy(max_tool_results=1),
+    )
+
+    assert context.continuity_state is not None
+    payload = context.continuity_state.metadata_payload()
+    raw_dropped = payload["dropped_tool_results"]
+    assert isinstance(raw_dropped, list)
+    dropped = cast(list[object], raw_dropped)
+    assert dropped == [
+        {
+            "tool_name": "write_file",
+            "status": "ok",
+            "index": 1,
+            "tool_call_id": "write-1",
+            "path": "secret.txt",
+            "estimated_tokens": context.continuity_state.dropped_tool_results[0].estimated_tokens,
+        }
+    ]
+    assert "RAW SECRET CONTENT" not in str(dropped)
+
+
+def test_prepare_provider_context_dropped_diagnostics_use_prepared_results() -> None:
+    context = prepare_provider_context(
+        prompt="search",
+        tool_results=(
+            ToolResult(tool_name="grep", status="ok", content="x" * 200, data={"index": 1}),
+            ToolResult(tool_name="grep", status="ok", content="latest", data={"index": 2}),
+        ),
+        session_metadata={},
+        policy=ContextWindowPolicy(
+            max_tool_results=1,
+            recent_tool_result_count=1,
+            per_tool_result_tokens={"grep": 30},
+        ),
+    )
+
+    assert context.continuity_state is not None
+    (diagnostic,) = context.continuity_state.dropped_tool_results
+    assert diagnostic.truncated is True
+    assert diagnostic.partial is True
+    assert diagnostic.metadata_payload()["truncated"] is True
+
+
 def test_continuity_state_metadata_payload_round_trips_v2_fields() -> None:
     state = RuntimeContinuityState(
         summary_text="summary",
@@ -726,6 +812,16 @@ def test_continuity_state_metadata_payload_round_trips_v2_fields() -> None:
         dropped_tool_result_count=2,
         retained_tool_result_count=1,
         source="tool_result_window",
+        dropped_tool_results=(
+            DroppedToolResultDiagnostic(
+                tool_name="read_file",
+                status="ok",
+                index=1,
+                tool_call_id="read-1",
+                path="sample.txt",
+                estimated_tokens=12,
+            ),
+        ),
         version=2,
     )
 

@@ -1638,6 +1638,32 @@ def test_runtime_session_debug_snapshot_includes_provider_context(tmp_path: Path
     )
 
 
+def test_runtime_session_debug_snapshot_uses_model_tool_feedback_mode(
+    tmp_path: Path,
+) -> None:
+    _ = (tmp_path / "sample.txt").write_text("provider debug\n", encoding="utf-8")
+    runtime = VoidCodeRuntime(
+        workspace=tmp_path,
+        config=RuntimeConfig(
+            model="opencode-go/minimax-m2.7",
+            execution_engine="deterministic",
+        ),
+    )
+
+    _ = runtime.run(RuntimeRequest(prompt="read sample.txt", session_id="synthetic-debug"))
+    snapshot = runtime.session_debug_snapshot(session_id="synthetic-debug")
+
+    provider_context = snapshot.provider_context
+    assert provider_context is not None
+    assert provider_context.provider == "opencode-go"
+    assert provider_context.provider_messages[-1].source == "provider_synthetic_tool_feedback"
+    assert provider_context.provider_messages[-1].role == "user"
+    assert any(
+        diagnostic.code == "provider_path_uses_synthetic_tool_feedback"
+        for diagnostic in provider_context.diagnostics
+    )
+
+
 def test_runtime_session_debug_snapshot_reconstructs_skill_prompt_context(
     tmp_path: Path,
 ) -> None:
@@ -8956,8 +8982,53 @@ def test_runtime_provider_compaction_emits_continuity_state_and_persists_metadat
         "anchor": summary_anchor,
         "source": summary_source,
     }
+    assert runtime_state["memory_refreshed"] == {
+        "last_summary_anchor": summary_anchor,
+        "last_original_tool_result_count": 2,
+        "last_retained_tool_result_count": 1,
+        "last_emitted_run_id": runtime_state["run_id"],
+    }
     replay_runtime_state = cast(dict[str, object], replay.session.metadata["runtime_state"])
     assert replay_runtime_state["continuity"] == expected_continuity
+
+
+def test_runtime_memory_refreshed_guard_suppresses_duplicate_anchor(tmp_path: Path) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path)
+    coordinator = runtime._run_loop_coordinator  # pyright: ignore[reportPrivateUsage]
+    session = SessionState(
+        session=SessionRef("memory-refresh-guard"),
+        status="running",
+        metadata={"runtime_state": {"run_id": "run-1"}},
+    )
+
+    first = coordinator._should_emit_memory_refreshed(  # pyright: ignore[reportPrivateUsage]
+        session=session,
+        summary_anchor="continuity:abc",
+        original_tool_result_count=9,
+        retained_tool_result_count=8,
+    )
+    updated = coordinator._session_with_memory_refreshed_state(  # pyright: ignore[reportPrivateUsage]
+        session=session,
+        summary_anchor="continuity:abc",
+        original_tool_result_count=9,
+        retained_tool_result_count=8,
+    )
+    duplicate = coordinator._should_emit_memory_refreshed(  # pyright: ignore[reportPrivateUsage]
+        session=updated,
+        summary_anchor="continuity:abc",
+        original_tool_result_count=9,
+        retained_tool_result_count=8,
+    )
+    changed = coordinator._should_emit_memory_refreshed(  # pyright: ignore[reportPrivateUsage]
+        session=updated,
+        summary_anchor="continuity:def",
+        original_tool_result_count=10,
+        retained_tool_result_count=8,
+    )
+
+    assert first is True
+    assert duplicate is False
+    assert changed is True
 
 
 def test_runtime_emits_context_pressure_with_cooldown_edge_control(tmp_path: Path) -> None:
@@ -13200,6 +13271,42 @@ def test_runtime_persists_provider_model_catalog_cache(tmp_path: Path) -> None:
     assert result.model_metadata["gpt-4o"].max_input_tokens == 111_616
     assert result.model_metadata["gpt-4o"].cost_per_input_token is not None
     assert result.model_metadata["gpt-4o"].modalities_input == ("text", "image")
+
+
+def test_runtime_hydrates_provider_tool_feedback_mode_from_catalog_cache(
+    tmp_path: Path,
+) -> None:
+    cache_dir = tmp_path / ".voidcode"
+    cache_dir.mkdir()
+    (cache_dir / "provider-model-catalog.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "providers": {
+                    "opencode-go": {
+                        "provider": "opencode-go",
+                        "models": ["minimax-m2.7"],
+                        "model_metadata": {
+                            "minimax-m2.7": {
+                                "context_window": 204_800,
+                            }
+                        },
+                        "refreshed": True,
+                        "source": "fallback",
+                        "last_refresh_status": "skipped",
+                        "last_error": None,
+                        "discovery_mode": "unavailable",
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    runtime = VoidCodeRuntime(workspace=tmp_path)
+
+    result = runtime.provider_models_result("opencode-go")
+
+    assert result.model_metadata["minimax-m2.7"].tool_feedback_mode == ("synthetic_user_message")
 
 
 def test_runtime_provider_validation_refreshes_past_persisted_catalog_cache(

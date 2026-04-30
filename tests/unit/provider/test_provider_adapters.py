@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -21,6 +22,8 @@ from voidcode.provider.errors import (
 from voidcode.provider.glm import GLMModelProvider
 from voidcode.provider.google import GoogleModelProvider
 from voidcode.provider.litellm import LiteLLMModelProvider
+from voidcode.provider.litellm_backend import LiteLLMBackendSingleAgentProvider
+from voidcode.provider.model_catalog import ProviderModelMetadata, infer_model_metadata
 from voidcode.provider.openai import OpenAIModelProvider
 from voidcode.provider.opencode_go import OpenCodeGoModelProvider
 from voidcode.provider.protocol import (
@@ -1236,7 +1239,7 @@ def test_provider_adapter_preserves_tool_call_id_and_arguments_in_tool_history(
     assert "tool_call_id" not in tool_content
 
 
-def test_opencode_go_provider_uses_user_tool_feedback_for_compatibility(
+def test_opencode_go_openai_compatible_provider_uses_tool_call_pairing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OpenCodeGoModelProvider().turn_provider()
@@ -1263,6 +1266,7 @@ def test_opencode_go_provider_uses_user_tool_feedback_for_compatibility(
         raw_model="opencode-go/kimi-k2.6",
         provider_name="opencode-go",
         model_name="kimi-k2.6",
+        model_metadata=infer_model_metadata("opencode-go", "kimi-k2.6"),
         attempt=request.attempt,
         abort_signal=request.abort_signal,
     )
@@ -1281,16 +1285,23 @@ def test_opencode_go_provider_uses_user_tool_feedback_for_compatibility(
     assert isinstance(messages_obj, list)
     messages = cast(list[dict[str, object]], messages_obj)
     assert messages[0] == {"role": "user", "content": "read sample.txt"}
-    assert messages[1]["role"] == "user"
-    feedback = messages[1]["content"]
-    assert isinstance(feedback, str)
-    assert "Completed tool calls for current request:" in feedback
-    assert '"tool_name": "list"' in feedback
-    assert '"arguments": {"path": "."}' in feedback
-    assert "tool_calls" not in messages[1]
+    assert messages[1] == {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "list_0",
+                "type": "function",
+                "function": {"name": "list", "arguments": '{"path": "."}'},
+            }
+        ],
+    }
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == "list_0"
+    assert "Completed tool calls for current request:" not in str(messages)
 
 
-def test_opencode_go_provider_sanitizes_user_tool_feedback(
+def test_opencode_go_openai_compatible_provider_sanitizes_tool_messages(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     provider = OpenCodeGoModelProvider().turn_provider()
@@ -1324,6 +1335,118 @@ def test_opencode_go_provider_sanitizes_user_tool_feedback(
         raw_model="opencode-go/glm-5.1",
         provider_name="opencode-go",
         model_name="glm-5.1",
+        model_metadata=infer_model_metadata("opencode-go", "glm-5.1"),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    messages_obj = payload.get("messages")
+    assert isinstance(messages_obj, list)
+    messages = cast(list[dict[str, object]], messages_obj)
+    assert messages[1]["role"] == "assistant"
+    assert "tool_calls" in messages[1]
+    tool_content = messages[2]["content"]
+    assert isinstance(tool_content, str)
+    assert raw_content not in tool_content
+    assert raw_patch not in tool_content
+    assert raw_data_uri not in tool_content
+    assert '"omitted": true' in tool_content
+    assert '"data_uri": {"byte_count"' in tool_content
+
+
+def test_opencode_go_mimo_preserves_standard_tool_pairing_with_model_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenCodeGoModelProvider().turn_provider()
+    request = _build_turn_request(model_name="opencode-go")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  README.md",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="opencode-go/mimo-v2.5-pro",
+        provider_name="opencode-go",
+        model_name="mimo-v2.5-pro",
+        model_metadata=infer_model_metadata("opencode-go", "mimo-v2.5-pro"),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    messages_obj = payload.get("messages")
+    assert isinstance(messages_obj, list)
+    messages = cast(list[dict[str, object]], messages_obj)
+    assert messages[1]["role"] == "assistant"
+    assert "tool_calls" in messages[1]
+    assert messages[2]["role"] == "tool"
+    assert messages[2]["tool_call_id"] == "list_0"
+    assert "Completed tool calls for current request:" not in str(messages)
+
+
+def test_provider_adapter_synthetic_tool_feedback_policy_is_provider_agnostic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LiteLLMBackendSingleAgentProvider(
+        name="custom",
+        config=None,
+    )
+    request = _build_turn_request(model_name="custom")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  .voidcode.json",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="custom/demo",
+        provider_name="custom",
+        model_name="demo",
+        model_metadata=ProviderModelMetadata(tool_feedback_mode="synthetic_user_message"),
         attempt=request.attempt,
         abort_signal=request.abort_signal,
     )
@@ -1344,11 +1467,231 @@ def test_opencode_go_provider_sanitizes_user_tool_feedback(
     assert messages[1]["role"] == "user"
     feedback = messages[1]["content"]
     assert isinstance(feedback, str)
-    assert raw_content not in feedback
-    assert raw_patch not in feedback
-    assert raw_data_uri not in feedback
-    assert '"omitted": true' in feedback
-    assert '"data_uri": {"byte_count"' in feedback
+    assert "Completed tool calls for current request:" in feedback
+    assert '"tool_name": "list"' in feedback
+    assert "tool_calls" not in messages[1]
+
+
+def test_provider_adapter_infers_tool_feedback_when_metadata_omits_mode(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenCodeGoModelProvider().turn_provider()
+    request = _build_turn_request(model_name="opencode-go")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  .voidcode.json",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="opencode-go/minimax-m2.7",
+        provider_name="opencode-go",
+        model_name="minimax-m2.7",
+        model_metadata=ProviderModelMetadata(context_window=204_800),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    messages_obj = payload.get("messages")
+    assert isinstance(messages_obj, list)
+    messages = cast(list[dict[str, object]], messages_obj)
+    assert messages[1]["role"] == "user"
+    feedback = messages[1]["content"]
+    assert isinstance(feedback, str)
+    assert "Completed tool calls for current request:" in feedback
+
+
+def test_provider_adapter_infers_tool_feedback_from_mapped_model_alias(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenCodeGoModelProvider(
+        config=SimplifiedProviderConfig(
+            api_key="opencode-go-key",
+            model_map={"my-minimax": "minimax-m2.7"},
+        )
+    ).turn_provider()
+    request = _build_turn_request(model_name="opencode-go")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  .voidcode.json",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="opencode-go/my-minimax",
+        provider_name="opencode-go",
+        model_name="my-minimax",
+        model_metadata=ProviderModelMetadata(context_window=204_800),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    assert payload["model"] == "minimax-m2.7"
+    assert payload["custom_llm_provider"] == "anthropic"
+    messages_obj = payload.get("messages")
+    assert isinstance(messages_obj, list)
+    messages = cast(list[dict[str, object]], messages_obj)
+    assert messages[1]["role"] == "user"
+    feedback = messages[1]["content"]
+    assert isinstance(feedback, str)
+    assert "Completed tool calls for current request:" in feedback
+
+
+def test_opencode_go_non_openai_families_declare_synthetic_tool_feedback_policy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = OpenCodeGoModelProvider().turn_provider()
+    request = _build_turn_request(model_name="opencode-go")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  .voidcode.json",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="opencode-go/minimax-m2.7",
+        provider_name="opencode-go",
+        model_name="minimax-m2.7",
+        model_metadata=infer_model_metadata("opencode-go", "minimax-m2.7"),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    messages_obj = payload.get("messages")
+    assert isinstance(messages_obj, list)
+    messages = cast(list[dict[str, object]], messages_obj)
+    assert messages[1]["role"] == "user"
+    feedback = messages[1]["content"]
+    assert isinstance(feedback, str)
+    assert "Completed tool calls for current request:" in feedback
+    assert '"tool_name": "list"' in feedback
+    assert "tool_calls" not in messages[1]
+
+
+def test_provider_adapter_logs_bounded_request_diagnostics(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG, logger="voidcode.provider.litellm_backend")
+    provider = OpenCodeGoModelProvider().turn_provider()
+    request = _build_turn_request(model_name="opencode-go")
+    tool_results = (
+        ToolResult(
+            tool_name="list",
+            status="ok",
+            content="./\n  .voidcode.json",
+            data={"tool_call_id": "list_0", "arguments": {"path": "."}},
+        ),
+    )
+    request = ProviderTurnRequest(
+        assembled_context=_assembled_from_legacy(
+            prompt=request.prompt,
+            tool_results=tool_results,
+            context_window=_StubContextWindow(
+                prompt=request.context_window.prompt,
+                tool_results=tool_results,
+                compacted=True,
+                retained_tool_result_count=1,
+                _continuity_state=_StubContinuityState(summary_text="Compacted old result"),
+            ),
+            applied_skills=request.applied_skills,
+        ),
+        available_tools=request.available_tools,
+        raw_model="opencode-go/minimax-m2.7",
+        provider_name="opencode-go",
+        model_name="minimax-m2.7",
+        model_metadata=infer_model_metadata("opencode-go", "minimax-m2.7"),
+        attempt=request.attempt,
+        abort_signal=request.abort_signal,
+    )
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="done",
+    )
+
+    _ = provider.propose_turn(request)
+
+    diagnostic_records = [
+        record
+        for record in caplog.records
+        if record.message.startswith("provider request diagnostics:")
+    ]
+    assert diagnostic_records
+    message = diagnostic_records[-1].message
+    assert "provider=opencode-go" in message
+    assert "model=minimax-m2.7" in message
+    assert "messages=3" in message
+    assert "retained_tool_results=1" in message
+    assert "synthetic_tool_feedback_size=" in message
+    assert "continuity_summary_size=" in message
+    assert "largest_message=" in message
 
 
 def test_provider_adapter_uses_runtime_assembled_context_for_agent_system_message(
@@ -1610,6 +1953,49 @@ def test_glm_provider_maps_disabled_reasoning_effort_to_disabled_thinking(
     assert isinstance(payload_obj, dict)
     payload = cast(dict[str, object], payload_obj)
     assert payload["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_litellm_backend_reasoning_effort_can_be_disabled_by_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = LiteLLMBackendSingleAgentProvider(
+        name="custom",
+        config=LiteLLMProviderConfig(base_url="http://localhost:4000"),
+        reasoning_effort_mode="disabled",
+    )
+
+    _patch_litellm_completion(
+        monkeypatch,
+        mode="completion",
+        completion_content="ok",
+    )
+
+    _ = provider.propose_turn(
+        ProviderTurnRequest(
+            assembled_context=_assembled_from_legacy(
+                prompt="read sample.txt",
+                tool_results=(),
+                context_window=_StubContextWindow(prompt="read sample.txt", tool_results=()),
+                applied_skills=(),
+            ),
+            available_tools=(
+                ToolDefinition(name="read_file", description="read file", read_only=True),
+            ),
+            raw_model="custom/glm-5.1",
+            provider_name="custom",
+            model_name="glm-5.1",
+            reasoning_effort="high",
+            attempt=0,
+            abort_signal=None,
+        )
+    )
+
+    payload_obj = _LAST_REQUEST_PAYLOAD.get("kwargs")
+    assert isinstance(payload_obj, dict)
+    payload = cast(dict[str, object], payload_obj)
+    assert "reasoning_effort" not in payload
+    assert "extra_body" not in payload
+    assert "allowed_openai_params" not in payload
 
 
 @pytest.mark.parametrize(

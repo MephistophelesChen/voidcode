@@ -16,7 +16,7 @@ class OpenCodeGoSingleAgentProvider(LiteLLMBackendSingleAgentProvider):
 
     def _completion_kwargs_for_request(self, request: ProviderTurnRequest) -> dict[str, object]:
         kwargs = LiteLLMBackendSingleAgentProvider._completion_kwargs_for_request(self, request)
-        model_name = request.model_name or ""
+        model_name = self._mapped_model_name_for_request(request)
         if model_name in _ANTHROPIC_COMPATIBLE_MODELS:
             kwargs["custom_llm_provider"] = "anthropic"
             kwargs["api_base"] = "https://opencode.ai/zen/go"
@@ -68,4 +68,5 @@ class OpenCodeGoModelProvider:
             name=self.name,
             config=adapted_config,
             use_raw_model_name=True,
+            reasoning_effort_mode="disabled",
         )

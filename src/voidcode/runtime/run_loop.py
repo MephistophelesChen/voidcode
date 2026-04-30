@@ -442,9 +442,10 @@ class RuntimeRunLoopCoordinator:
         provider_attempt = runtime._provider_attempt_from_metadata(graph_request.metadata)
         reasoning_capture_state = runtime._reasoning_capture_state()
         while True:
+            current_graph_request: GraphRunRequest = graph_request
             current_session = session
             base_context = runtime._prepare_provider_context_window(
-                prompt=graph_request.prompt,
+                prompt=current_graph_request.prompt,
                 tool_results=tuple(tool_results),
                 session_metadata=current_session.metadata,
             )
@@ -476,7 +477,7 @@ class RuntimeRunLoopCoordinator:
             session = runtime._session_with_context_window_metadata(current_session, context_window)
             skill_prompt_context = ""
             preserved_system_segments: list[str] = []
-            for segment in graph_request.assembled_context.segments:
+            for segment in current_graph_request.assembled_context.segments:
                 if segment.role != "system" or not isinstance(segment.content, str):
                     continue
                 if segment.content.startswith("Runtime-managed todo state is active"):
@@ -486,18 +487,18 @@ class RuntimeRunLoopCoordinator:
                     skill_prompt_context = segment.content
             graph_request = GraphRunRequest(
                 session=session,
-                prompt=graph_request.prompt,
-                available_tools=graph_request.available_tools,
+                prompt=current_graph_request.prompt,
+                available_tools=current_graph_request.available_tools,
                 context_window=context_window,
                 assembled_context=runtime._assemble_provider_context(
-                    prompt=graph_request.prompt,
+                    prompt=current_graph_request.prompt,
                     tool_results=context_window.tool_results,
                     session_metadata=session.metadata,
                     skill_prompt_context=skill_prompt_context,
                     preserved_system_segments=tuple(preserved_system_segments),
                 ),
-                metadata=graph_request.metadata,
-                abort_signal=graph_request.abort_signal,
+                metadata=current_graph_request.metadata,
+                abort_signal=current_graph_request.abort_signal,
             )
             effective_runtime_config = runtime._effective_runtime_config_from_metadata(
                 session.metadata
@@ -557,41 +558,36 @@ class RuntimeRunLoopCoordinator:
                         session.session.id,
                         hook_outcome.failed_error,
                     )
-            if context_window.compacted and reinjected_continuity is None:
-                token_metadata: dict[str, object] = {}
-                if context_window.token_budget is not None:
-                    token_metadata = {
-                        "original_tool_result_tokens": (context_window.original_tool_result_tokens),
-                        "retained_tool_result_tokens": (context_window.retained_tool_result_tokens),
-                        "dropped_tool_result_tokens": context_window.dropped_tool_result_tokens,
-                        "token_budget": context_window.token_budget,
-                        "token_estimate_source": context_window.token_estimate_source,
-                    }
-                sequence += 1
-                yield RuntimeStreamChunk(
-                    kind="event",
+            if (
+                context_window.compacted
+                and reinjected_continuity is None
+                and self._should_emit_memory_refreshed(
                     session=session,
-                    event=EventEnvelope(
-                        session_id=session.session.id,
-                        sequence=sequence,
-                        event_type=RUNTIME_MEMORY_REFRESHED,
-                        source="runtime",
-                        payload={
-                            "reason": context_window.compaction_reason,
-                            "original_tool_result_count": context_window.original_tool_result_count,
-                            "retained_tool_result_count": context_window.retained_tool_result_count,
-                            **token_metadata,
-                            "compacted": True,
-                            "summary_anchor": context_window.summary_anchor,
-                            "summary_source": context_window.summary_source,
-                            "continuity_state": (
-                                context_window.continuity_state.metadata_payload()
-                                if context_window.continuity_state is not None
-                                else None
-                            ),
-                        },
-                    ),
+                    summary_anchor=context_window.summary_anchor,
+                    original_tool_result_count=context_window.original_tool_result_count,
+                    retained_tool_result_count=context_window.retained_tool_result_count,
                 )
+            ):
+                memory_payload = self._build_memory_refreshed_payload(context_window)
+                if memory_payload is not None:
+                    session = self._session_with_memory_refreshed_state(
+                        session=session,
+                        summary_anchor=context_window.summary_anchor,
+                        original_tool_result_count=context_window.original_tool_result_count,
+                        retained_tool_result_count=context_window.retained_tool_result_count,
+                    )
+                    sequence += 1
+                    yield RuntimeStreamChunk(
+                        kind="event",
+                        session=session,
+                        event=EventEnvelope(
+                            session_id=session.session.id,
+                            sequence=sequence,
+                            event_type=RUNTIME_MEMORY_REFRESHED,
+                            source="runtime",
+                            payload=memory_payload,
+                        ),
+                    )
             tool_exception_recovery_enabled = (
                 effective_runtime_config.execution_engine == "provider"
             )
@@ -1389,6 +1385,98 @@ class RuntimeRunLoopCoordinator:
         if context_window.continuity_state is not None:
             payload["continuity_state"] = context_window.continuity_state.metadata_payload()
         return payload
+
+    @staticmethod
+    def _build_memory_refreshed_payload(
+        context_window: RuntimeContextWindow,
+    ) -> dict[str, object] | None:
+        if not context_window.compacted:
+            return None
+        token_metadata: dict[str, object] = {}
+        if context_window.token_budget is not None:
+            token_metadata = {
+                "original_tool_result_tokens": context_window.original_tool_result_tokens,
+                "retained_tool_result_tokens": context_window.retained_tool_result_tokens,
+                "dropped_tool_result_tokens": context_window.dropped_tool_result_tokens,
+                "token_budget": context_window.token_budget,
+                "token_estimate_source": context_window.token_estimate_source,
+            }
+        return {
+            "reason": context_window.compaction_reason,
+            "original_tool_result_count": context_window.original_tool_result_count,
+            "retained_tool_result_count": context_window.retained_tool_result_count,
+            **token_metadata,
+            "compacted": True,
+            "summary_anchor": context_window.summary_anchor,
+            "summary_source": context_window.summary_source,
+            "continuity_state": (
+                context_window.continuity_state.metadata_payload()
+                if context_window.continuity_state is not None
+                else None
+            ),
+        }
+
+    @staticmethod
+    def _should_emit_memory_refreshed(
+        *,
+        session: SessionState,
+        summary_anchor: str | None,
+        original_tool_result_count: int,
+        retained_tool_result_count: int,
+    ) -> bool:
+        raw_runtime_state = session.metadata.get("runtime_state")
+        runtime_state = (
+            cast(dict[str, object], raw_runtime_state)
+            if isinstance(raw_runtime_state, dict)
+            else {}
+        )
+        current_run_id_raw = runtime_state.get("run_id")
+        current_run_id = current_run_id_raw if isinstance(current_run_id_raw, str) else None
+        raw_memory_state = runtime_state.get("memory_refreshed")
+        memory_state = (
+            cast(dict[str, object], raw_memory_state) if isinstance(raw_memory_state, dict) else {}
+        )
+        last_run_id_raw = memory_state.get("last_emitted_run_id")
+        last_run_id = last_run_id_raw if isinstance(last_run_id_raw, str) else None
+        if current_run_id is not None and last_run_id is not None and current_run_id != last_run_id:
+            return True
+        if summary_anchor is not None and memory_state.get("last_summary_anchor") == summary_anchor:
+            return False
+        return not (
+            memory_state.get("last_original_tool_result_count") == original_tool_result_count
+            and memory_state.get("last_retained_tool_result_count") == retained_tool_result_count
+        )
+
+    @staticmethod
+    def _session_with_memory_refreshed_state(
+        *,
+        session: SessionState,
+        summary_anchor: str | None,
+        original_tool_result_count: int,
+        retained_tool_result_count: int,
+    ) -> SessionState:
+        raw_runtime_state = session.metadata.get("runtime_state")
+        runtime_state = (
+            dict(cast(dict[str, object], raw_runtime_state))
+            if isinstance(raw_runtime_state, dict)
+            else {}
+        )
+        runtime_state["memory_refreshed"] = {
+            "last_summary_anchor": summary_anchor,
+            "last_original_tool_result_count": original_tool_result_count,
+            "last_retained_tool_result_count": retained_tool_result_count,
+            "last_emitted_run_id": (
+                runtime_state.get("run_id")
+                if isinstance(runtime_state.get("run_id"), str)
+                else None
+            ),
+        }
+        return SessionState(
+            session=session.session,
+            status=session.status,
+            turn=session.turn,
+            metadata={**session.metadata, "runtime_state": runtime_state},
+        )
 
     @staticmethod
     def _should_emit_context_pressure(
