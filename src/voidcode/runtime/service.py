@@ -2405,7 +2405,10 @@ class VoidCodeRuntime:
         text = raw_path.strip()
         if not text:
             return None
-        candidate = Path(text).expanduser()
+        try:
+            candidate = Path(text).expanduser()
+        except RuntimeError:
+            candidate = Path(text)
         if not candidate.is_absolute():
             candidate = self._workspace / candidate
         try:

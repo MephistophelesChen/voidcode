@@ -176,6 +176,16 @@ def test_runtime_ignores_shell_executable_path_candidate() -> None:
     assert VoidCodeRuntime._extract_shell_path_candidates(command) == ()
 
 
+def test_runtime_canonicalize_candidate_path_handles_unknown_user_tilde(
+    tmp_path: Path,
+) -> None:
+    runtime = VoidCodeRuntime(workspace=tmp_path)
+
+    canonical = runtime._canonicalize_candidate_path("~unknownuser/file.txt")
+
+    assert canonical == (tmp_path / "~unknownuser/file.txt").resolve(strict=False)
+
+
 @dataclass(slots=True)
 class _StubStep:
     tool_call: ToolCall | None = None
